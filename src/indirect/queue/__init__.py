@@ -1,0 +1,1 @@
+"""RabbitMQ queue configuration module."""
