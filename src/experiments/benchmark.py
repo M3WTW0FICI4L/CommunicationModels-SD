@@ -75,7 +75,8 @@ class BenchmarkRunner:
     Subclasses plug in the correct send function.
     """
 
-    def __init__(self, num_workers: int = 50):
+    def __init__(self, client_class=None, num_workers: int = 1):
+        self.client_class = client_class
         self.num_workers = num_workers
         self.results: List[Dict[str, Any]] = []
         self.start_time: Optional[float] = None

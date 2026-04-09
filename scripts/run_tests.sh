@@ -53,14 +53,14 @@ else
     fi
 fi
 
-# Determine pytest command (PATH first, then module)
-if command -v pytest > /dev/null 2>&1; then
-    PYTEST_CMD="pytest"
-elif ${PYTHON} -m pytest --version > /dev/null 2>&1; then
+# Determine pytest command (venv first, then PATH)
+if ${PYTHON} -m pytest --version > /dev/null 2>&1; then
     PYTEST_CMD="${PYTHON} -m pytest"
+elif command -v pytest > /dev/null 2>&1; then
+    PYTEST_CMD="pytest"
 else
-    echo -e "${YELLOW}pytest not found. Installing into venv or user env...${NC}"
-    INSTALL_OUT=$(${PIP} install --user pytest pytest-cov 2>&1 || true)
+    echo -e "${YELLOW}pytest not found. Installing into venv...${NC}"
+    INSTALL_OUT=$(${PIP} install pytest pytest-cov 2>&1 || true)
     if echo "${INSTALL_OUT}" | grep -qi "externally-managed-environment"; then
         echo -e "${RED}Error: pip operation blocked by Debian 'externally-managed-environment'.${NC}"
         echo "Please do one of the following:"
@@ -72,9 +72,7 @@ else
         exit 1
     fi
 
-    if command -v pytest > /dev/null 2>&1; then
-        PYTEST_CMD="pytest"
-    elif ${PYTHON} -m pytest --version > /dev/null 2>&1; then
+    if ${PYTHON} -m pytest --version > /dev/null 2>&1; then
         PYTEST_CMD="${PYTHON} -m pytest"
     else
         echo -e "${RED}pytest still not available after install attempt.${NC}"

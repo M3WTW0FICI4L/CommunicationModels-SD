@@ -1,18 +1,18 @@
 # Git ignore file for SD Project
 ## Python
-.venv/*
-.pytest_cache/*
-*/.venv/*
-*/.pytest_cache/*
-__pycache__/*
-*/__pycache__/*
+.venv/
+.pytest_cache/
+*/.venv/
+*/.pytest_cache/
+__pycache__/
+*/__pycache__/
 *.pyc
 *.pyo
 *.pyd
 *.log
 *.coverage
 coverage.xml
-htmlcov/*
+htmlcov/
 
 
 ## Base ignores for Visual Studio

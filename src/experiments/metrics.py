@@ -72,11 +72,12 @@ class CorrectnessValidator:
         successful_count: int, max_tickets: int = 20_000
     ) -> Dict[str, Any]:
         """Check that we haven't oversold unnumbered tickets."""
+        valid = successful_count <= max_tickets
         return {
-            "valid": successful_count <= max_tickets,
-            "expected_max": max_tickets,
+            "valid": valid,
+            "expected": max_tickets,
             "actual": successful_count,
-            "oversold": max(0, successful_count - max_tickets),
+            "error": not valid,
         }
 
     @staticmethod
