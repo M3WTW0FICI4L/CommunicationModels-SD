@@ -1,150 +1,133 @@
 """
-RabbitMQ Queue configuration and utilities.
+RabbitMQ queue configuration and utilities.
 """
 
 from typing import Dict, Any
-import json
+import pika
 
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
 
 class QueueConfig:
-    """Configuration for RabbitMQ queues."""
-    
-    # Queue names
+    """Centralised queue names and settings."""
+
     PURCHASE_QUEUE = "ticket_purchases"
     RESPONSE_QUEUE = "ticket_responses"
-    PRIORITY_QUEUE = "ticket_purchases_priority"
-    
-    # Queue settings
+
     QUEUE_DURABLE = True
     QUEUE_EXCLUSIVE = False
     QUEUE_AUTO_DELETE = False
-    QUEUE_MAX_PRIORITY = 10
-    
-    # Message TTL and expiration
-    MESSAGE_TTL = 1800000  # 30 minutes in milliseconds
-    
-    # Dead letter exchanges
+
+    # Dead-letter exchange for unprocessable messages
     DLX_NAME = "ticket_dlx"
     DLX_QUEUE = "ticket_dlq"
 
+    # Message TTL: 30 minutes (ms)
+    MESSAGE_TTL = 1_800_000
 
-def get_queue_arguments(max_priority: int = 10) -> Dict[str, Any]:
-    """
-    Get RabbitMQ queue arguments for priority queues.
-    
-    Args:
-        max_priority: Maximum priority level (0-10)
-    
-    Returns:
-        Dictionary of queue arguments
-    """
+
+def get_queue_arguments() -> Dict[str, Any]:
+    """Return standard arguments used when declaring the purchase queue."""
     return {
-        "x-max-length": 1000000,      # Max messages in queue
-        "x-max-priority": max_priority,
         "x-message-ttl": QueueConfig.MESSAGE_TTL,
         "x-dead-letter-exchange": QueueConfig.DLX_NAME,
     }
 
 
-def get_connection_url(host: str, port: int, user: str, password: str, vhost: str = "/") -> str:
-    """
-    Get RabbitMQ connection URL.
-    
-    Args:
-        host: RabbitMQ host
-        port: RabbitMQ port
-        user: Username
-        password: Password
-        vhost: Virtual host
-    
-    Returns:
-        Connection URL
-    """
-    # URL format: amqp://user:password@host:port/vhost
-    return f"amqp://{user}:{password}@{host}:{port}/{vhost}"
+def get_connection_url(host: str, port: int, user: str, password: str,
+                       vhost: str = "/") -> str:
+    """Build a pika-compatible AMQP URL."""
+    import urllib.parse
+    vhost_encoded = urllib.parse.quote(vhost, safe="")
+    return f"amqp://{user}:{password}@{host}:{port}/{vhost_encoded}"
 
+
+# ---------------------------------------------------------------------------
+# QueueManager
+# ---------------------------------------------------------------------------
 
 class QueueManager:
-    """Manager for queue operations."""
-    
+    """Low-level helper that wraps a pika BlockingConnection."""
+
     def __init__(self):
-        """Initialize queue manager."""
-        self.connection = None
-        self.channel = None
-    
+        self.connection: pika.BlockingConnection | None = None
+        self.channel: pika.adapters.blocking_connection.BlockingChannel | None = None
+
     def connect(self, connection_url: str) -> None:
-        """
-        Establish connection to RabbitMQ.
-        
-        Args:
-            connection_url: RabbitMQ connection URL
-        """
-        # TODO: Implement RabbitMQ connection
-        pass
-    
+        """Open a blocking AMQP connection and create a channel."""
+        params = pika.URLParameters(connection_url)
+        params.heartbeat = 600
+        params.blocked_connection_timeout = 300
+        self.connection = pika.BlockingConnection(params)
+        self.channel = self.connection.channel()
+
     def disconnect(self) -> None:
-        """Close RabbitMQ connection."""
-        # TODO: Implement disconnection
-        pass
-    
-    def declare_queue(self, queue_name: str, **kwargs) -> None:
-        """
-        Declare a queue.
-        
-        Args:
-            queue_name: Name of the queue
-            **kwargs: Additional queue arguments
-        """
-        # TODO: Implement queue declaration
-        pass
-    
-    def declare_exchange(self, exchange_name: str, exchange_type: str = "direct") -> None:
-        """
-        Declare an exchange.
-        
-        Args:
-            exchange_name: Name of the exchange
-            exchange_type: Type of exchange (direct, topic, fanout, headers)
-        """
-        # TODO: Implement exchange declaration
-        pass
-    
-    def bind_queue(self, queue_name: str, exchange_name: str, routing_key: str = "") -> None:
-        """
-        Bind a queue to an exchange.
-        
-        Args:
-            queue_name: Queue name
-            exchange_name: Exchange name
-            routing_key: Routing key (routing pattern)
-        """
-        # TODO: Implement queue binding
-        pass
-    
+        """Gracefully close channel and connection."""
+        try:
+            if self.channel and self.channel.is_open:
+                self.channel.close()
+        except Exception:
+            pass
+        try:
+            if self.connection and self.connection.is_open:
+                self.connection.close()
+        except Exception:
+            pass
+        self.channel = None
+        self.connection = None
+
+    def declare_queue(self, queue_name: str, durable: bool = True,
+                      arguments: Dict[str, Any] | None = None) -> None:
+        """Idempotent queue declaration."""
+        self.channel.queue_declare(
+            queue=queue_name,
+            durable=durable,
+            arguments=arguments or {},
+        )
+
+    def declare_exchange(self, exchange_name: str,
+                         exchange_type: str = "direct",
+                         durable: bool = True) -> None:
+        """Idempotent exchange declaration."""
+        self.channel.exchange_declare(
+            exchange=exchange_name,
+            exchange_type=exchange_type,
+            durable=durable,
+        )
+
+    def bind_queue(self, queue_name: str, exchange_name: str,
+                   routing_key: str = "") -> None:
+        """Bind a queue to an exchange."""
+        self.channel.queue_bind(
+            queue=queue_name,
+            exchange=exchange_name,
+            routing_key=routing_key,
+        )
+
     def setup_dlq(self) -> None:
-        """Set up dead letter exchange and queue for error handling."""
-        # TODO: Implement DLQ setup
-        pass
-    
+        """Declare the dead-letter exchange and queue."""
+        self.declare_exchange(QueueConfig.DLX_NAME, exchange_type="fanout")
+        self.channel.queue_declare(queue=QueueConfig.DLX_QUEUE, durable=True)
+        self.bind_queue(QueueConfig.DLX_QUEUE, QueueConfig.DLX_NAME)
+
     def purge_queue(self, queue_name: str) -> None:
-        """
-        Purge all messages from a queue.
-        
-        Args:
-            queue_name: Queue name
-        """
-        # TODO: Implement queue purge
-        pass
-    
+        """Remove all pending messages from a queue."""
+        self.channel.queue_purge(queue=queue_name)
+
     def get_queue_stats(self, queue_name: str) -> Dict[str, Any]:
         """
-        Get statistics for a queue.
-        
-        Args:
-            queue_name: Queue name
-        
-        Returns:
-            Queue statistics dictionary
+        Passive declare returns message/consumer counts.
+        Returns {} if the queue does not exist.
         """
-        # TODO: Implement stats retrieval
-        return {}
+        try:
+            result = self.channel.queue_declare(
+                queue=queue_name, passive=True
+            )
+            return {
+                "message_count": result.method.message_count,
+                "consumer_count": result.method.consumer_count,
+            }
+        except Exception:
+            return {}

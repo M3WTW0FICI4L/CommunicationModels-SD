@@ -4,129 +4,196 @@ Sends purchase requests to RabbitMQ queue.
 """
 
 import json
-import time
-from typing import Optional, List, Dict, Any
+import threading
 from concurrent.futures import ThreadPoolExecutor
+from typing import Dict, List, Optional
 
-from ...common.models import BuyRequest, TicketType
+import pika
+
 from ...common.config import Config
 from ...common.logger import setup_logger
+from ..queue.queue_config import (
+    QueueConfig,
+    QueueManager,
+    get_connection_url,
+    get_queue_arguments,
+)
 
 
 logger = setup_logger(__name__)
 
 
 class IndirectProducer:
-    """
-    Producer that sends ticket purchase requests to RabbitMQ queue.
-    Clients use this to submit requests asynchronously.
-    """
-    
-    def __init__(self, queue_url: Optional[str] = None):
-        """
-        Initialize producer.
-        
-        Args:
-            queue_url: RabbitMQ connection URL
-        """
-        self.queue_url = queue_url or self._default_queue_url()
-        self.connection = None
-        self.channel = None
-    
-    def _default_queue_url(self) -> str:
-        """Build default RabbitMQ connection URL from config."""
-        # TODO: Build URL from Config
-        pass
-    
-    def connect(self) -> None:
-        """Establish connection to RabbitMQ."""
-        # TODO: Implement connection logic
-        pass
-    
-    def disconnect(self) -> None:
-        """Close connection to RabbitMQ."""
-        # TODO: Implement disconnection logic
-        pass
-    
-    def send_unnumbered_request(self, client_id: str, request_id: str) -> None:
-        """
-        Send unnumbered ticket purchase request to queue.
-        
-        Args:
-            client_id: Client identifier
-            request_id: Unique request identifier
-        """
-        # TODO: Implement message sending
-        # Format: {client_id, request_id, ticket_type: unnumbered}
-        # Send to PURCHASE_QUEUE
-        pass
-    
-    def send_numbered_request(self, client_id: str, request_id: str, seat_id: int) -> None:
-        """
-        Send numbered ticket purchase request to queue.
-        
-        Args:
-            client_id: Client identifier
-            request_id: Unique request identifier
-            seat_id: Seat number
-        """
-        # TODO: Implement message sending
-        # Format: {client_id, request_id, ticket_type: numbered, seat_id}
-        # Send to PURCHASE_QUEUE
-        pass
-    
-    def send_batch(self, requests: List[dict]) -> None:
-        """
-        Send multiple requests in batch.
-        
-        Args:
-            requests: List of request dictionaries
-        """
-        # TODO: Implement batch sending, potentially with parallelization
-        pass
-    
-    def send_with_priority(self, request: dict, priority: int = 0) -> None:
-        """
-        Send request with priority level.
-        
-        Args:
-            request: Request dictionary
-            priority: Priority level (0-10, higher is more urgent)
-        """
-        # TODO: Implement priority message sending
-        pass
+    """Publishes ticket-purchase requests onto the RabbitMQ purchase queue."""
 
+    def __init__(self, queue_url: Optional[str] = None):
+        self.queue_url = queue_url or self._default_queue_url()
+        self._mgr = QueueManager()
+
+    # ------------------------------------------------------------------
+    # Helpers
+    # ------------------------------------------------------------------
+
+    def _default_queue_url(self) -> str:
+        return get_connection_url(
+            host=Config.RABBITMQ_HOST,
+            port=Config.RABBITMQ_PORT,
+            user=Config.RABBITMQ_USER,
+            password=Config.RABBITMQ_PASS,
+            vhost=Config.RABBITMQ_VHOST,
+        )
+
+    def _publish(self, body: dict) -> None:
+        """Publish a JSON-encoded message to the purchase queue."""
+        self._mgr.channel.basic_publish(
+            exchange="",
+            routing_key=QueueConfig.PURCHASE_QUEUE,
+            body=json.dumps(body),
+            properties=pika.BasicProperties(
+                delivery_mode=2,       # persistent
+                content_type="application/json",
+            ),
+        )
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
+
+    def connect(self) -> None:
+        """Connect to RabbitMQ and ensure the purchase queue exists."""
+        self._mgr.connect(self.queue_url)
+        self._mgr.setup_dlq()
+        self._mgr.declare_queue(
+            QueueConfig.PURCHASE_QUEUE,
+            durable=True,
+            arguments=get_queue_arguments(),
+        )
+        logger.info("Producer connected to RabbitMQ")
+
+    def disconnect(self) -> None:
+        """Close the RabbitMQ connection."""
+        self._mgr.disconnect()
+        logger.info("Producer disconnected")
+
+    # ------------------------------------------------------------------
+    # Send methods
+    # ------------------------------------------------------------------
+
+    def send_unnumbered_request(self, client_id: str, request_id: str) -> None:
+        """Enqueue an unnumbered ticket purchase request."""
+        self._publish({
+            "client_id": client_id,
+            "request_id": request_id,
+            "ticket_type": "unnumbered",
+        })
+
+    def send_numbered_request(self, client_id: str, request_id: str,
+                               seat_id: int) -> None:
+        """Enqueue a numbered seat purchase request."""
+        self._publish({
+            "client_id": client_id,
+            "request_id": request_id,
+            "ticket_type": "numbered",
+            "seat_id": seat_id,
+        })
+
+    def send_batch(self, requests: List[dict]) -> None:
+        """Send a list of request dicts sequentially."""
+        for req in requests:
+            self._publish(req)
+
+    def send_with_priority(self, request: dict, priority: int = 0) -> None:
+        """Publish with an AMQP priority header (0–9)."""
+        self._mgr.channel.basic_publish(
+            exchange="",
+            routing_key=QueueConfig.PURCHASE_QUEUE,
+            body=json.dumps(request),
+            properties=pika.BasicProperties(
+                delivery_mode=2,
+                content_type="application/json",
+                priority=max(0, min(priority, 9)),
+            ),
+        )
+
+
+# ---------------------------------------------------------------------------
+# BulkProducer – high-throughput batched sender
+# ---------------------------------------------------------------------------
 
 class BulkProducer(IndirectProducer):
     """
-    Optimized producer for high-volume bulk submissions.
-    Supports batching and parallel sending.
+    Optimised producer for benchmark runs.
+
+    Buffers messages locally and flushes in batches.  Uses publisher
+    confirms for reliability.
     """
-    
-    def __init__(self, queue_url: Optional[str] = None, batch_size: int = 100):
-        """
-        Initialize bulk producer.
-        
-        Args:
-            queue_url: RabbitMQ connection URL
-            batch_size: Size of batches for sending
-        """
+
+    def __init__(self, queue_url: Optional[str] = None, batch_size: int = 500):
         super().__init__(queue_url)
         self.batch_size = batch_size
-        self.buffer: List[dict] = []
-    
+        self._buffer: List[dict] = []
+        self._lock = threading.Lock()
+
+    def connect(self) -> None:
+        super().connect()
+        # Enable publisher confirms so we know messages were accepted
+        self._mgr.channel.confirm_delivery()
+
     def add_request(self, request: dict) -> None:
-        """
-        Add request to buffer.
-        Automatically sends when buffer reaches batch_size.
-        
-        Args:
-            request: Request dictionary
-        """
-        # TODO: Implement buffering logic
-        pass
-    
+        """Buffer a request; auto-flush when the batch is full."""
+        with self._lock:
+            self._buffer.append(request)
+            if len(self._buffer) >= self.batch_size:
+                self._flush_locked()
+
     def flush(self) -> None:
-        """Send all buffered requests."""
-        # TODO: Implement buffer flushing
-        pass
+        """Force-send all buffered requests."""
+        with self._lock:
+            self._flush_locked()
+
+    def _flush_locked(self) -> None:
+        """Send all buffered messages (must hold self._lock)."""
+        for req in self._buffer:
+            self._publish(req)
+        self._buffer.clear()
+
+    def load_and_send_file(self, file_path: str,
+                            ticket_type: str = "unnumbered",
+                            max_workers: int = 1) -> int:
+        """
+        Read a benchmark file and publish all lines to the queue.
+
+        Returns the number of messages sent.
+        """
+        entries = []
+        with open(file_path) as fh:
+            for line in fh:
+                line = line.strip()
+                if not line or line.startswith("#"):
+                    continue
+                parts = line.split()
+                if parts[0] != "BUY":
+                    continue
+                if ticket_type == "unnumbered":
+                    # BUY client_id request_id
+                    entries.append({
+                        "client_id": parts[1],
+                        "request_id": parts[2],
+                        "ticket_type": "unnumbered",
+                    })
+                else:
+                    # BUY client_id seat_id request_id
+                    entries.append({
+                        "client_id": parts[1],
+                        "request_id": parts[3],
+                        "ticket_type": "numbered",
+                        "seat_id": int(parts[2]),
+                    })
+
+        count = 0
+        for entry in entries:
+            self.add_request(entry)
+            count += 1
+        self.flush()
+        logger.info(f"BulkProducer sent {count} messages from {file_path}")
+        return count
