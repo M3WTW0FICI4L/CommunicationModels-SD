@@ -16,14 +16,10 @@ Scalable ticket acquisition system to compare direct vs indirect middleware unde
 
 ## Repository Structure
 
-- `src/`: application code
   - `src/backend/`: consistency and ticket logic (shared by both architectures)
   - `src/direct/`: API server + client + load-balancing components
   - `src/indirect/`: queue config + producer + worker pool
   - `src/experiments/`: benchmark runners and metrics helpers
-- `docker/`: compose files and Dockerfiles for direct and indirect stacks
-- `benchmarks/`: fixed benchmark input files
-- `results/`: output artifacts
   - `results/direct/numbered/`
   - `results/direct/numbered/contention/`
   - `results/direct/unnumbered/`
@@ -32,13 +28,9 @@ Scalable ticket acquisition system to compare direct vs indirect middleware unde
   - `results/indirect/unnumbered/`
   - `results/tests/`
   - `results/plots/`
+
 - `scripts/`: setup, benchmark orchestration, plotting, and test scripts
 - `tests/`: unit/integration-style tests for core modules
-- `docs/`: requirements and work plan
-
-## Main Scripts
-
-- `scripts/setup_docker.sh`
   - Verifies/installs Docker + Compose, fixes permissions, checks daemon access.
 
 - `scripts/run_all_benchmarks.sh`
@@ -47,6 +39,7 @@ Scalable ticket acquisition system to compare direct vs indirect middleware unde
     `1 2 4 8 16 32 50`.
   - Also runs a **high-contention matrix** (numbered only) for both architectures.
   - Stores JSON results in the typed folder structure under `results/`.
+  - Optional 4th argument `SERVER_HOST`: when set to a non-localhost address, skips local Docker lifecycle and targets a remote server.
 
 - `scripts/run_contention_benchmark.sh`
   - Single high-contention run for the `numbered` model.
@@ -141,6 +134,12 @@ If Docker is already configured and you want to skip setup:
 ./scripts/run_all_benchmarks.sh true
 ```
 
+To run against a remote server (see [Running on Two Machines](#running-on-two-machines)):
+
+```bash
+./scripts/run_all_benchmarks.sh true false false <SERVER_IP>
+```
+
 ### B) Individual runs
 
 Direct single run:
@@ -191,6 +190,81 @@ python3 -m src.main \
   --api-url http://localhost:80 \
   --output results/direct/numbered/contention/c50_$(date +%Y%m%d_%H%M%S).json
 ```
+
+## Running on Two Machines
+
+One machine acts as **server** (runs Docker + containers) and the other as **client** (runs benchmarks, tests and plots). Both must be reachable on the same network.
+
+Required ports open on the server:
+
+| Port  | Service            | Architecture |
+|-------|--------------------|--------------|
+| 80    | NGINX (REST API)   | Direct       |
+| 5672  | RabbitMQ AMQP      | Indirect     |
+| 15672 | RabbitMQ UI (opt.) | Indirect     |
+
+### Server machine: start the architecture
+
+```bash
+# Direct
+docker compose -f docker/docker-compose.direct.yml up -d --build
+
+# Indirect
+docker compose -f docker/docker-compose.indirect.yml up -d --build --scale worker=4
+```
+
+### Client machine: run benchmarks
+
+**Option A — orchestrator script (4th argument = server IP):**
+
+```bash
+# Direct benchmarks only
+./scripts/run_all_benchmarks.sh true false true <SERVER_IP>
+
+# Indirect benchmarks only
+./scripts/run_all_benchmarks.sh true true false <SERVER_IP>
+
+# Both (server must have both stacks running simultaneously)
+./scripts/run_all_benchmarks.sh true false false <SERVER_IP>
+```
+
+**Option B — individual scripts:**
+
+```bash
+# Direct
+./scripts/run_direct_benchmark.sh unnumbered 50 http://<SERVER_IP>:80
+./scripts/run_direct_benchmark.sh numbered   50 http://<SERVER_IP>:80
+./scripts/run_contention_benchmark.sh direct 50  http://<SERVER_IP>:80
+
+# Indirect (RABBITMQ_HOST overrides the default localhost)
+RABBITMQ_HOST=<SERVER_IP> ./scripts/run_indirect_benchmark.sh unnumbered 50
+RABBITMQ_HOST=<SERVER_IP> ./scripts/run_indirect_benchmark.sh numbered   50
+RABBITMQ_HOST=<SERVER_IP> ./scripts/run_contention_benchmark.sh indirect 50
+```
+
+### Client machine: tests and plots
+
+Tests are pure unit tests — no live server needed:
+
+```bash
+./scripts/run_tests.sh
+```
+
+Plots are generated locally from the JSON results saved on the client:
+
+```bash
+python3 scripts/plot_results.py
+```
+
+### Configurable environment variables (indirect)
+
+| Variable          | Default     | Description             |
+|-------------------|-------------|-------------------------|
+| `RABBITMQ_HOST`   | `localhost` | RabbitMQ server address |
+| `RABBITMQ_PORT`   | `5672`      | AMQP port               |
+| `RABBITMQ_USER`   | `guest`     | RabbitMQ user           |
+| `RABBITMQ_PASS`   | `guest`     | RabbitMQ password       |
+| `RABBITMQ_VHOST`  | `/`         | Virtual host            |
 
 ## Results Layout
 

@@ -60,6 +60,13 @@ mkdir -p "$RESULTS_DIR_DIRECT/unnumbered" "$RESULTS_DIR_DIRECT/numbered"
 mkdir -p "$RESULTS_DIR_INDIRECT/unnumbered" "$RESULTS_DIR_INDIRECT/numbered"
 
 DOCKER_RUN_MODE="direct"
+SERVER_HOST="localhost"
+USE_LOCAL_DOCKER="true"
+
+is_local_host() {
+    local host="$1"
+    [ "$host" = "localhost" ] || [ "$host" = "127.0.0.1" ]
+}
 
 detect_docker_run_mode() {
     if docker ps >/dev/null 2>&1; then
@@ -142,19 +149,37 @@ reset_direct_state() {
         sleep 0.5
     done
 
-    # Fallback: flush Redis directly if endpoint reset fails.
-    run_docker_cmd "docker compose -f docker/docker-compose.direct.yml exec -T redis redis-cli FLUSHDB" >/dev/null 2>&1 || true
+    # Local-only fallback: flush Redis directly if endpoint reset fails.
+    if [ "$USE_LOCAL_DOCKER" = "true" ]; then
+        run_docker_cmd "docker compose -f docker/docker-compose.direct.yml exec -T redis redis-cli FLUSHDB" >/dev/null 2>&1 || true
+    fi
 }
 
 reset_indirect_state() {
-    # Clear Redis state used by workers.
-    run_docker_cmd "docker compose -f docker/docker-compose.indirect.yml exec -T redis redis-cli FLUSHDB" >/dev/null
+    # Local-only Redis reset used by workers.
+    if [ "$USE_LOCAL_DOCKER" = "true" ]; then
+        run_docker_cmd "docker compose -f docker/docker-compose.indirect.yml exec -T redis redis-cli FLUSHDB" >/dev/null
+    fi
 
     # Purge RabbitMQ purchase/response queues to avoid cross-run contamination.
+    RABBITMQ_HOST="$RABBITMQ_HOST" \
+    RABBITMQ_PORT="$RABBITMQ_PORT" \
+    RABBITMQ_USER="$RABBITMQ_USER" \
+    RABBITMQ_PASS="$RABBITMQ_PASS" \
+    RABBITMQ_VHOST="$RABBITMQ_VHOST" \
     "$PYTHON_BIN" - <<'PY'
+import os
+import urllib.parse
 import pika
 
-conn = pika.BlockingConnection(pika.URLParameters("amqp://guest:guest@localhost:5672/%2F"))
+host = os.environ.get("RABBITMQ_HOST", "localhost")
+port = int(os.environ.get("RABBITMQ_PORT", "5672"))
+user = os.environ.get("RABBITMQ_USER", "guest")
+password = os.environ.get("RABBITMQ_PASS", "guest")
+vhost = os.environ.get("RABBITMQ_VHOST", "/")
+
+amqp_url = f"amqp://{user}:{password}@{host}:{port}/{urllib.parse.quote(vhost, safe='')}"
+conn = pika.BlockingConnection(pika.URLParameters(amqp_url))
 ch = conn.channel()
 for q in ("ticket_purchase_queue", "ticket_response_queue"):
     ch.queue_declare(queue=q, durable=True)
@@ -162,21 +187,37 @@ for q in ("ticket_purchase_queue", "ticket_response_queue"):
 conn.close()
 PY
 
-    # Restart workers so in-memory idempotency cache is cleared between runs.
-    run_docker_cmd "docker compose -f docker/docker-compose.indirect.yml restart worker" >/dev/null
-    sleep 2
+    # Local-only worker restart to clear in-memory idempotency cache.
+    if [ "$USE_LOCAL_DOCKER" = "true" ]; then
+        run_docker_cmd "docker compose -f docker/docker-compose.indirect.yml restart worker" >/dev/null
+        sleep 2
+    fi
 }
 
 # Parse arguments
 SKIP_DOCKER_SETUP="${1:-false}"
 SKIP_DIRECT="${2:-false}"
 SKIP_INDIRECT="${3:-false}"
+SERVER_HOST="${4:-localhost}"
+
+if is_local_host "$SERVER_HOST"; then
+    USE_LOCAL_DOCKER="true"
+else
+    USE_LOCAL_DOCKER="false"
+fi
+
+RABBITMQ_HOST="${RABBITMQ_HOST:-$SERVER_HOST}"
+RABBITMQ_PORT="${RABBITMQ_PORT:-5672}"
+RABBITMQ_USER="${RABBITMQ_USER:-guest}"
+RABBITMQ_PASS="${RABBITMQ_PASS:-guest}"
+RABBITMQ_VHOST="${RABBITMQ_VHOST:-/}"
+export RABBITMQ_HOST RABBITMQ_PORT RABBITMQ_USER RABBITMQ_PASS RABBITMQ_VHOST
 
 # ---------------------------------------------------------------------------
 # Docker Setup
 # ---------------------------------------------------------------------------
 
-if [ "$SKIP_DOCKER_SETUP" != "true" ]; then
+if [ "$USE_LOCAL_DOCKER" = "true" ] && [ "$SKIP_DOCKER_SETUP" != "true" ]; then
     log_section "Step 1: Docker Setup"
     bash "$SCRIPT_DIR/setup_docker.sh" || {
         log_error "Docker setup failed"
@@ -190,7 +231,11 @@ if [ ! -x "$CONTENTION_RUNNER" ]; then
     chmod +x "$CONTENTION_RUNNER"
 fi
 
-detect_docker_run_mode || exit 1
+if [ "$USE_LOCAL_DOCKER" = "true" ]; then
+    detect_docker_run_mode || exit 1
+else
+    log_warning "Remote server mode enabled (SERVER_HOST=${SERVER_HOST}); local Docker lifecycle is skipped"
+fi
 
 # ---------------------------------------------------------------------------
 # Direct Architecture Benchmark
@@ -199,13 +244,25 @@ detect_docker_run_mode || exit 1
 if [ "$SKIP_DIRECT" != "true" ]; then
     log_section "Step 2: Direct Architecture (REST + Redis)"
 
-    API_URL="http://localhost:80"
-    log_warning "Launching direct architecture..."
-    if DIRECT_UP_OUTPUT=$(run_docker_cmd "docker compose -f docker/docker-compose.direct.yml up -d --build" 2>&1); then
-        printf '%s\n' "$DIRECT_UP_OUTPUT" | head -20
-        sleep 5
-        log_success "Direct architecture running"
+    API_URL="http://${SERVER_HOST}:80"
 
+    if [ "$USE_LOCAL_DOCKER" = "true" ]; then
+        log_warning "Launching direct architecture..."
+        if DIRECT_UP_OUTPUT=$(run_docker_cmd "docker compose -f docker/docker-compose.direct.yml up -d --build" 2>&1); then
+            printf '%s\n' "$DIRECT_UP_OUTPUT" | head -20
+            sleep 5
+            log_success "Direct architecture running"
+        else
+            printf '%s\n' "$DIRECT_UP_OUTPUT" | head -20
+            log_error "Failed to launch direct architecture"
+            API_URL=""
+        fi
+    else
+        log_warning "Using remote direct architecture at ${API_URL}"
+        sleep 1
+    fi
+
+    if [ -n "$API_URL" ]; then
         log_warning "Running direct benchmark matrix (types x concurrencies)..."
         for TICKET_TYPE in unnumbered numbered; do
             WORKLOAD="$(direct_workload_for_type "$TICKET_TYPE")"
@@ -242,15 +299,14 @@ if [ "$SKIP_DIRECT" != "true" ]; then
                 continue
             }
         done
-        
+
         log_success "Direct benchmarks completed"
-        
-        log_warning "Stopping direct architecture..."
-        run_docker_cmd "docker compose -f docker/docker-compose.direct.yml down" || true
-        sleep 2
-    else
-        printf '%s\n' "$DIRECT_UP_OUTPUT" | head -20
-        log_error "Failed to launch direct architecture"
+
+        if [ "$USE_LOCAL_DOCKER" = "true" ]; then
+            log_warning "Stopping direct architecture..."
+            run_docker_cmd "docker compose -f docker/docker-compose.direct.yml down" || true
+            sleep 2
+        fi
     fi
 fi
 
@@ -261,60 +317,67 @@ fi
 if [ "$SKIP_INDIRECT" != "true" ]; then
     log_section "Step 3: Indirect Architecture (RabbitMQ + Redis + Workers)"
 
-    log_warning "Launching indirect architecture with 4 workers..."
-    if INDIRECT_UP_OUTPUT=$(run_docker_cmd "docker compose -f docker/docker-compose.indirect.yml up -d --build --scale worker=4" 2>&1); then
-        printf '%s\n' "$INDIRECT_UP_OUTPUT" | head -20
-        sleep 10  # Wait longer for RabbitMQ and workers to be healthy
-        log_success "Indirect architecture running"
+    if [ "$USE_LOCAL_DOCKER" = "true" ]; then
+        log_warning "Launching indirect architecture with 4 workers..."
+        if INDIRECT_UP_OUTPUT=$(run_docker_cmd "docker compose -f docker/docker-compose.indirect.yml up -d --build --scale worker=4" 2>&1); then
+            printf '%s\n' "$INDIRECT_UP_OUTPUT" | head -20
+            sleep 10  # Wait longer for RabbitMQ and workers to be healthy
+            log_success "Indirect architecture running"
+        else
+            printf '%s\n' "$INDIRECT_UP_OUTPUT" | head -20
+            log_error "Failed to launch indirect architecture"
+        fi
+    else
+        log_warning "Using remote indirect architecture at ${RABBITMQ_HOST}:${RABBITMQ_PORT}"
+        sleep 1
+    fi
 
-        log_warning "Running indirect benchmark matrix (types x concurrencies)..."
-        for TICKET_TYPE in unnumbered numbered; do
-            WORKLOAD="$(direct_workload_for_type "$TICKET_TYPE")"
+    log_warning "Running indirect benchmark matrix (types x concurrencies)..."
+    for TICKET_TYPE in unnumbered numbered; do
+        WORKLOAD="$(direct_workload_for_type "$TICKET_TYPE")"
 
-            for C in "${CONCURRENCY_LEVELS[@]}"; do
-                OUTPUT="${RESULTS_DIR_INDIRECT}/${TICKET_TYPE}/c${C}_${TIMESTAMP}.json"
-                echo "Indirect: type=${TICKET_TYPE} concurrency=${C} ..."
-
-                reset_indirect_state || {
-                    log_warning "Could not reset indirect state before run"
-                }
-
-                "$PYTHON_BIN" -m src.main \
-                    --mode benchmark-indirect \
-                    --ticket-type "$TICKET_TYPE" \
-                    --workload "$WORKLOAD" \
-                    --concurrent-clients "$C" \
-                    --output "$OUTPUT" || {
-                        log_warning "Indirect run failed: type=${TICKET_TYPE} concurrency=${C}"
-                        continue
-                    }
-
-                echo "  → $OUTPUT"
-            done
-        done
-
-        log_warning "Running indirect HIGH-CONTENTION matrix (numbered only)..."
         for C in "${CONCURRENCY_LEVELS[@]}"; do
-            echo "Indirect contention: concurrency=${C} ..."
+            OUTPUT="${RESULTS_DIR_INDIRECT}/${TICKET_TYPE}/c${C}_${TIMESTAMP}.json"
+            echo "Indirect: type=${TICKET_TYPE} concurrency=${C} ..."
 
             reset_indirect_state || {
-                log_warning "Could not reset indirect state before contention run"
+                log_warning "Could not reset indirect state before run"
             }
 
-            "$CONTENTION_RUNNER" indirect "$C" || {
-                log_warning "Indirect contention run failed: concurrency=${C}"
-                continue
-            }
+            "$PYTHON_BIN" -m src.main \
+                --mode benchmark-indirect \
+                --ticket-type "$TICKET_TYPE" \
+                --workload "$WORKLOAD" \
+                --concurrent-clients "$C" \
+                --output "$OUTPUT" || {
+                    log_warning "Indirect run failed: type=${TICKET_TYPE} concurrency=${C}"
+                    continue
+                }
+
+            echo "  → $OUTPUT"
         done
-        
-        log_success "Indirect benchmarks completed"
-        
+    done
+
+    log_warning "Running indirect HIGH-CONTENTION matrix (numbered only)..."
+    for C in "${CONCURRENCY_LEVELS[@]}"; do
+        echo "Indirect contention: concurrency=${C} ..."
+
+        reset_indirect_state || {
+            log_warning "Could not reset indirect state before contention run"
+        }
+
+        "$CONTENTION_RUNNER" indirect "$C" || {
+            log_warning "Indirect contention run failed: concurrency=${C}"
+            continue
+        }
+    done
+
+    log_success "Indirect benchmarks completed"
+
+    if [ "$USE_LOCAL_DOCKER" = "true" ]; then
         log_warning "Stopping indirect architecture..."
         run_docker_cmd "docker compose -f docker/docker-compose.indirect.yml down" || true
         sleep 2
-    else
-        printf '%s\n' "$INDIRECT_UP_OUTPUT" | head -20
-        log_error "Failed to launch indirect architecture"
     fi
 fi
 
