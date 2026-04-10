@@ -29,6 +29,7 @@ class IndirectProducer:
     def __init__(self, queue_url: Optional[str] = None):
         self.queue_url = queue_url or self._default_queue_url()
         self._mgr = QueueManager()
+        self._publish_lock = threading.Lock()  # Synchronize concurrent publishes
 
     # ------------------------------------------------------------------
     # Helpers
@@ -44,16 +45,17 @@ class IndirectProducer:
         )
 
     def _publish(self, body: dict) -> None:
-        """Publish a JSON-encoded message to the purchase queue."""
-        self._mgr.channel.basic_publish(
-            exchange="",
-            routing_key=QueueConfig.PURCHASE_QUEUE,
-            body=json.dumps(body),
-            properties=pika.BasicProperties(
-                delivery_mode=2,       # persistent
-                content_type="application/json",
-            ),
-        )
+        """Publish a JSON-encoded message to the purchase queue (thread-safe)."""
+        with self._publish_lock:
+            self._mgr.channel.basic_publish(
+                exchange="",
+                routing_key=QueueConfig.PURCHASE_QUEUE,
+                body=json.dumps(body),
+                properties=pika.BasicProperties(
+                    delivery_mode=2,       # persistent
+                    content_type="application/json",
+                ),
+            )
 
     # ------------------------------------------------------------------
     # Lifecycle

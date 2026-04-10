@@ -138,16 +138,6 @@ Utility scripts for:
 
 ---
 
-### 📓 `notebooks/`
-
-Jupyter notebooks for:
-
-* Data exploration
-* Visualization
-* Debugging experiments
-
----
-
 ### 🧪 `tests/`
 
 Test suite:

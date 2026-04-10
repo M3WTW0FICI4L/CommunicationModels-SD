@@ -13,6 +13,9 @@ __pycache__/
 *.coverage
 coverage.xml
 htmlcov/
+results/*/*.json
+results/*/*.xml
+results/*/*.html
 
 
 ## Base ignores for Visual Studio
