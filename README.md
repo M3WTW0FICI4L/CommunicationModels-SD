@@ -25,8 +25,10 @@ Scalable ticket acquisition system to compare direct vs indirect middleware unde
 - `benchmarks/`: fixed benchmark input files
 - `results/`: output artifacts
   - `results/direct/numbered/`
+  - `results/direct/numbered/contention/`
   - `results/direct/unnumbered/`
   - `results/indirect/numbered/`
+  - `results/indirect/numbered/contention/`
   - `results/indirect/unnumbered/`
   - `results/tests/`
   - `results/plots/`
@@ -43,7 +45,17 @@ Scalable ticket acquisition system to compare direct vs indirect middleware unde
   - Main benchmark entrypoint.
   - Runs matrix for both architectures and both ticket types over concurrencies:
     `1 2 4 8 16 32 50`.
+  - Also runs a **high-contention matrix** (numbered only) for both architectures.
   - Stores JSON results in the typed folder structure under `results/`.
+
+- `scripts/run_contention_benchmark.sh`
+  - Single high-contention run for the `numbered` model.
+  - Supports both architectures:
+    - `./scripts/run_contention_benchmark.sh direct <concurrency> <api_url>`
+    - `./scripts/run_contention_benchmark.sh indirect <concurrency>`
+  - Stores JSON in:
+    - `results/direct/numbered/contention/`
+    - `results/indirect/numbered/contention/`
 
 - `scripts/run_direct_benchmark.sh`
   - Single direct benchmark run for one ticket type and one concurrency.
@@ -60,7 +72,10 @@ Scalable ticket acquisition system to compare direct vs indirect middleware unde
 
 - `scripts/plot_results.py`
   - Loads benchmark JSON recursively from `results/direct/**` and `results/indirect/**`.
-  - Generates plots in `results/plots/`.
+  - Generates standard plots in `results/plots/`.
+  - Generates contention comparison plots when contention data exists:
+    - `direct_vs_indirect_contention_numbered.png`
+    - `latency_p95_comparison_contention_numbered.png`
 
 - `scripts/generate_contention_benchmark.py`
   - Generates a numbered high-contention workload (80% of traffic against 5% of seats).
@@ -152,7 +167,20 @@ python3 scripts/generate_contention_benchmark.py \
   --total 60000
 ```
 
-Then run benchmark using that file (example direct):
+Run a single high-contention benchmark with the dedicated script:
+
+```bash
+./scripts/run_contention_benchmark.sh direct 50 http://localhost:80
+./scripts/run_contention_benchmark.sh indirect 50
+```
+
+Or run the complete matrix (including contention) with:
+
+```bash
+./scripts/run_all_benchmarks.sh
+```
+
+If you prefer invoking the benchmark module manually (example direct):
 
 ```bash
 python3 -m src.main \
@@ -161,7 +189,7 @@ python3 -m src.main \
   --workload benchmarks/benchmark_numbered_contention.txt \
   --concurrent-clients 50 \
   --api-url http://localhost:80 \
-  --output results/direct/numbered/contention_c50_$(date +%Y%m%d_%H%M%S).json
+  --output results/direct/numbered/contention/c50_$(date +%Y%m%d_%H%M%S).json
 ```
 
 ## Results Layout
@@ -169,13 +197,26 @@ python3 -m src.main \
 - Direct:
   - `results/direct/unnumbered/*.json`
   - `results/direct/numbered/*.json`
+  - `results/direct/numbered/contention/*.json`
 - Indirect:
   - `results/indirect/unnumbered/*.json`
   - `results/indirect/numbered/*.json`
+  - `results/indirect/numbered/contention/*.json`
 - Tests:
   - `results/tests/*`
 - Plots:
-  - `results/plots/*.png`
+  - Standard:
+    - `results/plots/throughput_vs_concurrency_direct.png`
+    - `results/plots/throughput_vs_concurrency_indirect.png`
+    - `results/plots/numbered_vs_unnumbered_direct.png`
+    - `results/plots/numbered_vs_unnumbered_indirect.png`
+    - `results/plots/direct_vs_indirect_unnumbered.png`
+    - `results/plots/direct_vs_indirect_numbered.png`
+    - `results/plots/latency_p95_comparison_unnumbered.png`
+    - `results/plots/latency_p95_comparison_numbered.png`
+  - Contention (generated only when contention JSON exists):
+    - `results/plots/direct_vs_indirect_contention_numbered.png`
+    - `results/plots/latency_p95_comparison_contention_numbered.png`
 
 ## Quick Start
 
@@ -208,6 +249,7 @@ python3 scripts/plot_results.py
 ```bash
 find results/direct results/indirect -type f -name "*.json"
 jq '.summary' results/direct/unnumbered/*.json | head -40
+jq '.summary' results/indirect/numbered/contention/*.json | head -40
 ```
 
 ## Note On High-Contention Generator

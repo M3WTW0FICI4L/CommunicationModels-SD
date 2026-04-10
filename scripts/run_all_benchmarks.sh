@@ -54,6 +54,7 @@ CONCURRENCY_LEVELS=(1 2 4 8 16 32 50)
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 RESULTS_DIR_DIRECT="results/direct"
 RESULTS_DIR_INDIRECT="results/indirect"
+CONTENTION_RUNNER="$SCRIPT_DIR/run_contention_benchmark.sh"
 
 mkdir -p "$RESULTS_DIR_DIRECT/unnumbered" "$RESULTS_DIR_DIRECT/numbered"
 mkdir -p "$RESULTS_DIR_INDIRECT/unnumbered" "$RESULTS_DIR_INDIRECT/numbered"
@@ -185,6 +186,10 @@ fi
 
 ensure_runtime_dependencies
 
+if [ ! -x "$CONTENTION_RUNNER" ]; then
+    chmod +x "$CONTENTION_RUNNER"
+fi
+
 detect_docker_run_mode || exit 1
 
 # ---------------------------------------------------------------------------
@@ -224,6 +229,18 @@ if [ "$SKIP_DIRECT" != "true" ]; then
 
                 echo "  → $OUTPUT"
             done
+        done
+
+        log_warning "Running direct HIGH-CONTENTION matrix (numbered only)..."
+        for C in "${CONCURRENCY_LEVELS[@]}"; do
+            echo "Direct contention: concurrency=${C} ..."
+
+            reset_direct_state "$API_URL"
+
+            "$CONTENTION_RUNNER" direct "$C" "$API_URL" || {
+                log_warning "Direct contention run failed: concurrency=${C}"
+                continue
+            }
         done
         
         log_success "Direct benchmarks completed"
@@ -275,6 +292,20 @@ if [ "$SKIP_INDIRECT" != "true" ]; then
                 echo "  → $OUTPUT"
             done
         done
+
+        log_warning "Running indirect HIGH-CONTENTION matrix (numbered only)..."
+        for C in "${CONCURRENCY_LEVELS[@]}"; do
+            echo "Indirect contention: concurrency=${C} ..."
+
+            reset_indirect_state || {
+                log_warning "Could not reset indirect state before contention run"
+            }
+
+            "$CONTENTION_RUNNER" indirect "$C" || {
+                log_warning "Indirect contention run failed: concurrency=${C}"
+                continue
+            }
+        done
         
         log_success "Indirect benchmarks completed"
         
@@ -312,5 +343,6 @@ echo ""
 echo "Next steps:"
 echo "  1. View results: find results/direct results/indirect -type f -name '*.json'"
 echo "  2. Plot results: python3 scripts/plot_results.py"
-echo "  3. Analyze JSON: jq '.summary' results/direct/unnumbered/*.json"
+echo "  3. Analyze standard JSON: jq '.summary' results/direct/unnumbered/*.json"
+echo "  4. Analyze contention JSON: jq '.summary' results/indirect/numbered/contention/*.json"
 echo ""

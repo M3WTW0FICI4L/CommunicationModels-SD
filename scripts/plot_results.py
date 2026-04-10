@@ -7,8 +7,11 @@ Produces:
   results/plots/throughput_vs_concurrency_indirect.png
   results/plots/direct_vs_indirect_unnumbered.png
   results/plots/direct_vs_indirect_numbered.png
-  results/plots/numbered_vs_unnumbered.png
+    results/plots/numbered_vs_unnumbered_direct.png
+    results/plots/numbered_vs_unnumbered_indirect.png
   results/plots/latency_p95_comparison.png
+    results/plots/direct_vs_indirect_contention_numbered.png
+    results/plots/latency_p95_comparison_contention_numbered.png
 
 Usage:
     python scripts/plot_results.py
@@ -50,8 +53,11 @@ def load_results(directory: str) -> list[dict]:
         # Supports both legacy format: <type>_cX_timestamp.json
         # and new format: results/<arch>/<type>/cX_timestamp.json
         parent_type = os.path.basename(os.path.dirname(path))
+        grandparent_type = os.path.basename(os.path.dirname(os.path.dirname(path)))
         if parent_type in {"unnumbered", "numbered"}:
             summary["_ticket_type"] = parent_type
+        elif grandparent_type in {"unnumbered", "numbered"}:
+            summary["_ticket_type"] = grandparent_type
 
         m = re.search(r"(?:^|_)?c(\d+)", fname)
         if m:
@@ -61,6 +67,12 @@ def load_results(directory: str) -> list[dict]:
             m_type = re.search(r"(unnumbered|numbered)", fname)
             if m_type:
                 summary["_ticket_type"] = m_type.group(1)
+
+        # Scenario tagging keeps standard plots separated from high-contention runs.
+        if parent_type == "contention" or fname.startswith("contention_"):
+            summary["_scenario"] = "contention"
+        else:
+            summary["_scenario"] = "standard"
 
         summary["_file"] = fname
         out.append(summary)
@@ -77,6 +89,10 @@ def group_by(records: list[dict], key: str) -> dict:
     return result
 
 
+def filter_by_scenario(records: list[dict], scenario: str) -> list[dict]:
+    return [r for r in records if r.get("_scenario", "standard") == scenario]
+
+
 # ---------------------------------------------------------------------------
 # Plot 1: Throughput vs Concurrency (per architecture, both ticket types)
 # ---------------------------------------------------------------------------
@@ -86,6 +102,8 @@ def plot_throughput_vs_concurrency(
     arch_label: str = "Direct Architecture",
     filename: str = "throughput_vs_concurrency_direct.png",
 ) -> None:
+    # Keep this plot focused on the standard benchmark matrix.
+    results = filter_by_scenario(results, "standard")
     by_type = group_by(results, "_ticket_type")
 
     fig, ax = plt.subplots(figsize=(8, 5))
@@ -116,6 +134,9 @@ def plot_direct_vs_indirect(
     indirect_results: list[dict],
     ticket_type: str = "unnumbered",
 ) -> None:
+    direct_results = filter_by_scenario(direct_results, "standard")
+    indirect_results = filter_by_scenario(indirect_results, "standard")
+
     def _filter_sort(records, ttype):
         filtered = [r for r in records if r.get("_ticket_type") == ttype]
         filtered.sort(key=lambda r: r.get("_concurrency", 0))
@@ -155,12 +176,19 @@ def plot_direct_vs_indirect(
 
 
 # ---------------------------------------------------------------------------
-# Plot 3: Numbered vs Unnumbered (direct, same concurrency)
+# Plot 3: Numbered vs Unnumbered (per architecture, same concurrency)
 # ---------------------------------------------------------------------------
 
-def plot_numbered_vs_unnumbered(direct_results: list[dict]) -> None:
-    by_type = group_by(direct_results, "_ticket_type")
-    concurrencies = sorted({r["_concurrency"] for r in direct_results if "_concurrency" in r})
+def plot_numbered_vs_unnumbered(
+    results: list[dict],
+    arch_label: str,
+    filename: str,
+) -> None:
+    # Keep this plot focused on the standard benchmark matrix.
+    filtered_results = filter_by_scenario(results, "standard")
+
+    by_type = group_by(filtered_results, "_ticket_type")
+    concurrencies = sorted({r["_concurrency"] for r in filtered_results if "_concurrency" in r})
 
     if not concurrencies:
         print("No concurrency data – skipping numbered vs unnumbered plot.")
@@ -177,8 +205,9 @@ def plot_numbered_vs_unnumbered(direct_results: list[dict]) -> None:
               if r.get("_concurrency") == c]
         if un or nb:
             labels.append(str(c))
-            unnumbered_tps.append(un[0] if un else 0)
-            numbered_tps.append(nb[0] if nb else 0)
+            # If multiple runs exist for the same concurrency, average them.
+            unnumbered_tps.append(float(np.mean(un)) if un else 0)
+            numbered_tps.append(float(np.mean(nb)) if nb else 0)
 
     x = np.arange(len(labels))
     width = 0.35
@@ -188,12 +217,12 @@ def plot_numbered_vs_unnumbered(direct_results: list[dict]) -> None:
     ax.bar(x + width / 2, numbered_tps,   width, label="Numbered")
     ax.set_xlabel("Concurrent Clients")
     ax.set_ylabel("Throughput (req/s)")
-    ax.set_title("Unnumbered vs Numbered Tickets – Direct Architecture")
+    ax.set_title(f"Unnumbered vs Numbered Tickets – {arch_label}")
     ax.set_xticks(x)
     ax.set_xticklabels(labels)
     ax.legend()
     ax.grid(True, linestyle="--", alpha=0.5, axis="y")
-    path = os.path.join(PLOTS_DIR, "numbered_vs_unnumbered.png")
+    path = os.path.join(PLOTS_DIR, filename)
     fig.tight_layout()
     fig.savefig(path, dpi=150)
     plt.close(fig)
@@ -209,6 +238,9 @@ def plot_latency_comparison(
     indirect_results: list[dict],
     ticket_type: str = "unnumbered",
 ) -> None:
+    direct_results = filter_by_scenario(direct_results, "standard")
+    indirect_results = filter_by_scenario(indirect_results, "standard")
+
     def _filter_sort(records, ttype):
         filtered = [r for r in records if r.get("_ticket_type") == ttype]
         filtered.sort(key=lambda r: r.get("_concurrency", 0))
@@ -258,6 +290,110 @@ def plot_latency_comparison(
 
 
 # ---------------------------------------------------------------------------
+# Plot 5: High-contention numbered comparison (direct vs indirect)
+# ---------------------------------------------------------------------------
+
+def plot_contention_throughput_direct_vs_indirect(
+    direct_results: list[dict],
+    indirect_results: list[dict],
+) -> None:
+    def _contention_numbered(records: list[dict]) -> list[dict]:
+        recs = [
+            r for r in filter_by_scenario(records, "contention")
+            if r.get("_ticket_type") == "numbered"
+        ]
+        recs.sort(key=lambda r: r.get("_concurrency", 0))
+        return recs
+
+    d_recs = _contention_numbered(direct_results)
+    i_recs = _contention_numbered(indirect_results)
+
+    if not d_recs and not i_recs:
+        print("No contention throughput data – skipping contention comparison plot.")
+        return
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    if d_recs:
+        ax.plot(
+            [r["_concurrency"] for r in d_recs],
+            [r.get("throughput_rps", 0) for r in d_recs],
+            marker="o", label="Direct (REST+NGINX)",
+        )
+    if i_recs:
+        ax.plot(
+            [r["_concurrency"] for r in i_recs],
+            [r.get("throughput_rps", 0) for r in i_recs],
+            marker="s", label="Indirect (RabbitMQ)",
+        )
+
+    ax.set_xlabel("Concurrent Clients / Workers")
+    ax.set_ylabel("Throughput (req/s)")
+    ax.set_title("Direct vs Indirect – Numbered Tickets (High Contention)")
+    ax.legend()
+    ax.grid(True, linestyle="--", alpha=0.5)
+    path = os.path.join(PLOTS_DIR, "direct_vs_indirect_contention_numbered.png")
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    print(f"Saved: {path}")
+
+
+def plot_contention_latency_direct_vs_indirect(
+    direct_results: list[dict],
+    indirect_results: list[dict],
+) -> None:
+    def _contention_numbered(records: list[dict]) -> list[dict]:
+        recs = [
+            r for r in filter_by_scenario(records, "contention")
+            if r.get("_ticket_type") == "numbered"
+        ]
+        recs.sort(key=lambda r: r.get("_concurrency", 0))
+        return recs
+
+    d_recs = _contention_numbered(direct_results)
+    i_recs = _contention_numbered(indirect_results)
+
+    if not d_recs and not i_recs:
+        print("No contention latency data – skipping contention latency plot.")
+        return
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    if d_recs:
+        ax.plot(
+            [r["_concurrency"] for r in d_recs],
+            [r.get("p95_response_time_s", 0) * 1000 for r in d_recs],
+            marker="o", label="Direct p95",
+        )
+        ax.plot(
+            [r["_concurrency"] for r in d_recs],
+            [r.get("mean_response_time_s", 0) * 1000 for r in d_recs],
+            marker="o", linestyle="--", label="Direct mean",
+        )
+    if i_recs:
+        ax.plot(
+            [r["_concurrency"] for r in i_recs],
+            [r.get("p95_response_time_s", 0) * 1000 for r in i_recs],
+            marker="s", label="Indirect p95",
+        )
+        ax.plot(
+            [r["_concurrency"] for r in i_recs],
+            [r.get("mean_response_time_s", 0) * 1000 for r in i_recs],
+            marker="s", linestyle="--", label="Indirect mean",
+        )
+
+    ax.set_xlabel("Concurrent Clients")
+    ax.set_ylabel("Latency (ms)")
+    ax.set_title("Latency Comparison – Numbered Tickets (High Contention)")
+    ax.legend()
+    ax.grid(True, linestyle="--", alpha=0.5)
+    path = os.path.join(PLOTS_DIR, "latency_p95_comparison_contention_numbered.png")
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    print(f"Saved: {path}")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -273,7 +409,11 @@ if __name__ == "__main__":
             arch_label="Direct Architecture",
             filename="throughput_vs_concurrency_direct.png",
         )
-        plot_numbered_vs_unnumbered(direct)
+        plot_numbered_vs_unnumbered(
+            direct,
+            arch_label="Direct Architecture",
+            filename="numbered_vs_unnumbered_direct.png",
+        )
 
     if indirect:
         plot_throughput_vs_concurrency(
@@ -281,9 +421,17 @@ if __name__ == "__main__":
             arch_label="Indirect Architecture (RabbitMQ)",
             filename="throughput_vs_concurrency_indirect.png",
         )
+        plot_numbered_vs_unnumbered(
+            indirect,
+            arch_label="Indirect Architecture (RabbitMQ)",
+            filename="numbered_vs_unnumbered_indirect.png",
+        )
 
     for ttype in ("unnumbered", "numbered"):
         plot_direct_vs_indirect(direct, indirect, ticket_type=ttype)
         plot_latency_comparison(direct, indirect, ticket_type=ttype)
+
+    plot_contention_throughput_direct_vs_indirect(direct, indirect)
+    plot_contention_latency_direct_vs_indirect(direct, indirect)
 
     print("Done.")
