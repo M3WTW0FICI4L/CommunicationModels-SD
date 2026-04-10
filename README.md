@@ -1,214 +1,215 @@
 # CommunicationModels-SD
 
-## 🏗️ Repository Design & Architecture
+Scalable ticket acquisition system to compare direct vs indirect middleware under high load and contention.
 
-This document explains the **internal design decisions** and **repository structure** of the project.
-It is intended to help developers understand how the system is organized and how different components interact.
+[![codecov](https://codecov.io/gh/M3WTW0FICI4L/CommunicationModels-SD/graph/badge.svg?token=QV602QYGAO)](https://codecov.io/gh/M3WTW0FICI4L/CommunicationModels-SD)
 
----
+## What This Project Implements
 
-## 🎯 Design Goals
+- Two ticket models:
+  - `unnumbered` (max 20,000 sales)
+  - `numbered` (seat `1..20000`, no double-sell)
+- Two communication architectures:
+  - Direct: REST API + NGINX load balancer + Redis
+  - Indirect: RabbitMQ + workers + Redis
+- Shared correctness core in `src/backend`
 
-The repository is structured to achieve the following:
+## Repository Structure
 
-* Clear separation between **business logic** and **communication layers**
-* Independent implementations of **direct** and **indirect** architectures
-* Reproducible **experiments and benchmarks**
-* Easy deployment in **distributed environments (AWS)**
-* Maintainability and extensibility
+- `src/`: application code
+  - `src/backend/`: consistency and ticket logic (shared by both architectures)
+  - `src/direct/`: API server + client + load-balancing components
+  - `src/indirect/`: queue config + producer + worker pool
+  - `src/experiments/`: benchmark runners and metrics helpers
+- `docker/`: compose files and Dockerfiles for direct and indirect stacks
+- `benchmarks/`: fixed benchmark input files
+- `results/`: output artifacts
+  - `results/direct/numbered/`
+  - `results/direct/unnumbered/`
+  - `results/indirect/numbered/`
+  - `results/indirect/unnumbered/`
+  - `results/tests/`
+  - `results/plots/`
+- `scripts/`: setup, benchmark orchestration, plotting, and test scripts
+- `tests/`: unit/integration-style tests for core modules
+- `docs/`: requirements and work plan
 
----
+## Main Scripts
 
-## 🧩 High-Level Architecture
+- `scripts/setup_docker.sh`
+  - Verifies/installs Docker + Compose, fixes permissions, checks daemon access.
 
-The system follows a **modular layered architecture**:
+- `scripts/run_all_benchmarks.sh`
+  - Main benchmark entrypoint.
+  - Runs matrix for both architectures and both ticket types over concurrencies:
+    `1 2 4 8 16 32 50`.
+  - Stores JSON results in the typed folder structure under `results/`.
 
-```text
-Clients → Communication Layer → Core Logic → Storage Backend
+- `scripts/run_direct_benchmark.sh`
+  - Single direct benchmark run for one ticket type and one concurrency.
+
+- `scripts/run_indirect_benchmark.sh`
+  - Single indirect benchmark run for one ticket type and one concurrency.
+
+- `scripts/run_tests.sh`
+  - Runs test suite with coverage.
+  - Saves artifacts under `results/tests/`:
+    - pytest log
+    - JUnit XML
+    - timestamped HTML coverage folder
+
+- `scripts/plot_results.py`
+  - Loads benchmark JSON recursively from `results/direct/**` and `results/indirect/**`.
+  - Generates plots in `results/plots/`.
+
+- `scripts/generate_contention_benchmark.py`
+  - Generates a numbered high-contention workload (80% of traffic against 5% of seats).
+  - Use this to run the additional contention experiments requested in requirements.
+
+## Where `generate_contention_benchmark` Writes Output
+
+By default, it writes to:
+
+- `benchmarks/benchmark_numbered_contention.txt`
+
+You can change it with `--output`:
+
+```bash
+python3 scripts/generate_contention_benchmark.py \
+  --output benchmarks/my_custom_contention.txt \
+  --total 60000
 ```
 
-* **Communication Layer**: Handles how requests enter the system (REST / RabbitMQ)
-* **Core Logic**: Implements ticket acquisition and consistency rules
-* **Storage Backend**: Ensures correctness using Redis / database
+The generated file format is compatible with the numbered benchmark parser:
 
----
+- `BUY <client_id> <seat_id> <request_id>`
 
-## 📁 Repository Structure
+## How To Run Tests
 
-### ⚙️ `src/`
+Recommended (stores all artifacts in `results/tests/`):
 
-Main source code, organized by responsibility:
+```bash
+./scripts/run_tests.sh
+```
 
-#### `common/`
+Artifacts produced:
 
-Shared utilities and data models:
+- `results/tests/pytest_<timestamp>.log`
+- `results/tests/junit_<timestamp>.xml`
+- `results/tests/htmlcov_<timestamp>/index.html`
 
-* Request/response structures
-* Configuration management
-* Logging utilities
+Optional direct pytest commands:
 
----
+```bash
+pytest -v
+pytest tests/test_models.py -v
+pytest tests/test_ticket_manager.py::TestTicketManagerInitialization::test_ticket_manager_initialization -v
+```
 
-#### `backend/`
+## How To Run Benchmarks
 
-Core business logic (shared across all architectures):
+### A) Full matrix (recommended)
 
-* Ticket management logic
-* Consistency enforcement (locks, transactions)
-* Storage abstraction (Redis / DB)
+Runs direct and indirect for both ticket types with concurrencies:
 
-👉 This is the **single source of truth** for correctness.
+- `1 2 4 8 16 32 50`
 
----
+Command:
 
-#### `direct/`
+```bash
+./scripts/run_all_benchmarks.sh
+```
 
-Implementation of the **direct communication architecture**:
+If Docker is already configured and you want to skip setup:
 
-* API server (REST / RPC)
-* Client implementation
-* Load balancing configuration (e.g., NGINX)
+```bash
+./scripts/run_all_benchmarks.sh true
+```
 
-👉 Requests are handled **synchronously**.
+### B) Individual runs
 
----
+Direct single run:
 
-#### `indirect/`
+```bash
+./scripts/run_direct_benchmark.sh unnumbered 50 http://localhost:80
+./scripts/run_direct_benchmark.sh numbered 50 http://localhost:80
+```
 
-Implementation of the **indirect communication architecture**:
+Indirect single run:
 
-* Producers (clients sending messages)
-* Workers (processing requests asynchronously)
-* Queue configuration (RabbitMQ)
+```bash
+./scripts/run_indirect_benchmark.sh unnumbered 50
+./scripts/run_indirect_benchmark.sh numbered 50
+```
 
-👉 Requests are handled **asynchronously via messaging**.
+### C) High-contention scenario
 
----
+Generate contention workload (80/5):
 
-#### `experiments/`
+```bash
+python3 scripts/generate_contention_benchmark.py \
+  --output benchmarks/benchmark_numbered_contention.txt \
+  --total 60000
+```
 
-Tools for evaluation:
+Then run benchmark using that file (example direct):
 
-* Benchmark execution
-* Workload loading
-* Metrics collection
-* Scalability tests
+```bash
+python3 -m src.main \
+  --mode benchmark-direct \
+  --ticket-type numbered \
+  --workload benchmarks/benchmark_numbered_contention.txt \
+  --concurrent-clients 50 \
+  --api-url http://localhost:80 \
+  --output results/direct/numbered/contention_c50_$(date +%Y%m%d_%H%M%S).json
+```
 
-👉 Ensures experiments are **reproducible and comparable**.
+## Results Layout
 
----
+- Direct:
+  - `results/direct/unnumbered/*.json`
+  - `results/direct/numbered/*.json`
+- Indirect:
+  - `results/indirect/unnumbered/*.json`
+  - `results/indirect/numbered/*.json`
+- Tests:
+  - `results/tests/*`
+- Plots:
+  - `results/plots/*.png`
 
-### 📊 `benchmarks/`
+## Quick Start
 
-Input workload files used for evaluation:
+1. Set up Docker environment:
 
-* Unnumbered ticket workload
-* Numbered ticket workload
-* High-contention scenarios
+```bash
+./scripts/setup_docker.sh
+```
 
----
+2. Run full benchmark matrix:
 
-### 📈 `results/`
+```bash
+./scripts/run_all_benchmarks.sh
+```
 
-Stores outputs from experiments:
+3. Run tests and store artifacts:
 
-* Raw execution results
-* Processed metrics
-* Generated plots
+```bash
+./scripts/run_tests.sh
+```
 
----
+4. Generate plots:
 
-### 📄 `docs/`
+```bash
+python3 scripts/plot_results.py
+```
 
-Project documentation:
+5. Inspect benchmark summaries:
 
-* Final report
-* Architecture diagrams
-* Supporting materials and figures
+```bash
+find results/direct results/indirect -type f -name "*.json"
+jq '.summary' results/direct/unnumbered/*.json | head -40
+```
 
----
+## Note On High-Contention Generator
 
-### 📜 `scripts/`
-
-Utility scripts for:
-
-* Deployment (AWS)
-* Starting/stopping services
-* Running benchmarks
-
----
-
-### 🧪 `tests/`
-
-Test suite:
-
-* Correctness validation
-* Concurrency testing
-* API behavior
-
----
-
-## 🔁 Design Principles
-
-### 1. Separation of Concerns
-
-* Communication logic is isolated from business logic
-* Backend logic is reused across architectures
-
----
-
-### 2. Reusability
-
-* Core logic (`backend/`) is shared by:
-
-  * Direct API servers
-  * Indirect workers
-
----
-
-### 3. Modularity
-
-* Each component can be modified independently
-* New communication models can be added easily
-
----
-
-### 4. Experimentation-Oriented
-
-* Benchmarks and results are first-class components
-* Enables systematic comparison between approaches
-
----
-
-## ⚖️ Architectural Decision
-
-A key design choice is:
-
-> **Single core logic + multiple communication interfaces**
-
-This ensures:
-
-* Consistent behavior across architectures
-* Fair performance comparison
-* Reduced code duplication
-
----
-
-## 🚀 Extending the Project
-
-Possible extensions:
-
-* Add new communication middleware (e.g., gRPC)
-* Experiment with different consistency models
-* Introduce caching or replication strategies
-* Improve fault tolerance mechanisms
-
----
-
-## 🧠 Summary
-
-This repository is designed as a **distributed systems experimentation platform**, where:
-
-* Multiple architectures can be implemented and compared
-* Performance and correctness can be systematically evaluated
-* The system remains modular, extensible, and reproducible
+`generate_contention_benchmark.py` is not redundant: it exists specifically to satisfy the high-contention requirement scenario. It does not replace standard benchmark files; it creates an additional synthetic workload for analysis.

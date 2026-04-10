@@ -1,275 +1,151 @@
-"""
-Unit tests for benchmark functionality.
-"""
+"""Unit tests for benchmark functionality."""
 
-import unittest
-from unittest.mock import Mock, MagicMock, patch, mock_open
-import tempfile
+import json
 import os
-from src.experiments.benchmark import WorkloadLoader, BenchmarkRunner
-from src.common.models import TicketType
+import tempfile
+import unittest
+
+from src.experiments.benchmark import BenchmarkRunner, WorkloadLoader
+
+
+class EchoRunner(BenchmarkRunner):
+    """Concrete runner for testing BenchmarkRunner behavior."""
+
+    def _send_request(self, item):
+        if item == "explode":
+            raise RuntimeError("boom")
+        if isinstance(item, dict):
+            return item
+        return {"status": "success"}
 
 
 class TestWorkloadLoader(unittest.TestCase):
-    """Test WorkloadLoader class."""
-    
-    def test_workload_loader_has_load_unnumbered(self):
-        """Test that WorkloadLoader has load_unnumbered method."""
-        self.assertTrue(hasattr(WorkloadLoader, 'load_unnumbered'))
-        self.assertTrue(callable(WorkloadLoader.load_unnumbered))
-    
-    def test_workload_loader_has_load_numbered(self):
-        """Test that WorkloadLoader has load_numbered method."""
-        self.assertTrue(hasattr(WorkloadLoader, 'load_numbered'))
-        self.assertTrue(callable(WorkloadLoader.load_numbered))
-    
-    def test_load_unnumbered_returns_list(self):
-        """Test that load_unnumbered returns a list."""
-        # Create a temporary file
-        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt') as f:
-            f.write("BUY client_001 req_001\n")
-            f.write("BUY client_002 req_002\n")
-            temp_file = f.name
-        
+    """Test workload parser behavior."""
+
+    def test_load_unnumbered_parses_valid_lines_only(self):
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".txt") as fh:
+            fh.write("# comment\n")
+            fh.write("\n")
+            fh.write("BAD line\n")
+            fh.write("BUY c1 r1\n")
+            fh.write("BUY c2 r2 extra-token\n")
+            path = fh.name
+
         try:
-            result = WorkloadLoader.load_unnumbered(temp_file)
-            # Should return list or None if not implemented
-            self.assertTrue(result is None or isinstance(result, list))
+            result = WorkloadLoader.load_unnumbered(path)
+            self.assertEqual(result, [("c1", "r1"), ("c2", "r2")])
         finally:
-            os.unlink(temp_file)
-    
-    def test_load_numbered_returns_list(self):
-        """Test that load_numbered returns a list."""
-        # Create a temporary file
-        with tempfile.NamedTemporaryFile(mode='w', delete=False, suffix='.txt') as f:
-            f.write("BUY client_001 1 req_001\n")
-            f.write("BUY client_002 2 req_002\n")
-            temp_file = f.name
-        
+            os.unlink(path)
+
+    def test_load_numbered_parses_and_reorders_fields(self):
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".txt") as fh:
+            fh.write("# comment\n")
+            fh.write("BUY c1 10 req-1\n")
+            fh.write("BUY c2 20 req-2\n")
+            fh.write("NOPE c3 30 req-3\n")
+            path = fh.name
+
         try:
-            result = WorkloadLoader.load_numbered(temp_file)
-            # Should return list or None if not implemented
-            self.assertTrue(result is None or isinstance(result, list))
+            result = WorkloadLoader.load_numbered(path)
+            self.assertEqual(result, [("c1", "req-1", 10), ("c2", "req-2", 20)])
         finally:
-            os.unlink(temp_file)
-    
-    def test_load_unnumbered_with_nonexistent_file(self):
-        """Test loading from nonexistent file."""
-        try:
-            result = WorkloadLoader.load_unnumbered("/nonexistent/file.txt")
-            # May return None or raise exception
-            self.assertTrue(result is None or isinstance(result, list))
-        except (FileNotFoundError, OSError):
-            # Expected for unimplemented method
-            pass
+            os.unlink(path)
+
+    def test_load_unnumbered_nonexistent_file_raises(self):
+        with self.assertRaises(FileNotFoundError):
+            WorkloadLoader.load_unnumbered("/definitely/missing/workload.txt")
 
 
 class TestBenchmarkRunner(unittest.TestCase):
-    """Test BenchmarkRunner class."""
-    
-    def setUp(self):
-        """Set up test fixtures."""
-        self.mock_client_class = MagicMock()
-    
-    def test_benchmark_runner_initialization(self):
-        """Test BenchmarkRunner initialization."""
-        runner = BenchmarkRunner(
-            client_class=self.mock_client_class,
-            num_workers=4
-        )
-        
-        self.assertEqual(runner.client_class, self.mock_client_class)
-        self.assertEqual(runner.num_workers, 4)
-        self.assertEqual(len(runner.results), 0)
-        self.assertIsNone(runner.start_time)
-        self.assertIsNone(runner.end_time)
-    
-    def test_benchmark_runner_initialization_default_workers(self):
-        """Test BenchmarkRunner with default workers."""
-        runner = BenchmarkRunner(client_class=self.mock_client_class)
-        
+    """Test benchmark runner core behavior and stats."""
+
+    def test_initialization_defaults(self):
+        runner = EchoRunner()
         self.assertEqual(runner.num_workers, 1)
-    
-    def test_benchmark_runner_has_run_benchmark(self):
-        """Test that runner has run_benchmark method."""
-        runner = BenchmarkRunner(
-            client_class=self.mock_client_class,
-            num_workers=2
-        )
-        
-        self.assertTrue(hasattr(runner, 'run_benchmark'))
-        self.assertTrue(callable(runner.run_benchmark))
-    
-    def test_benchmark_runner_has_get_results(self):
-        """Test that runner has get_results method."""
-        runner = BenchmarkRunner(
-            client_class=self.mock_client_class,
-            num_workers=2
-        )
-        
-        self.assertTrue(hasattr(runner, 'get_results'))
-        self.assertTrue(callable(runner.get_results))
-    
-    def test_run_benchmark_accepts_workload(self):
-        """Test run_benchmark accepts workload list."""
-        runner = BenchmarkRunner(
-            client_class=self.mock_client_class,
-            num_workers=2
-        )
-        
-        workload = [
-            ("client_001", "req_001"),
-            ("client_002", "req_002"),
-        ]
-        
-        try:
-            result = runner.run_benchmark(workload=workload)
-            # Should return a dict or None if not implemented
-            self.assertTrue(result is None or isinstance(result, dict))
-        except (NotImplementedError, TypeError):
-            # Expected for unimplemented method
-            pass
-    
-    def test_run_benchmark_accepts_concurrent_clients_param(self):
-        """Test run_benchmark accepts concurrent_clients parameter."""
-        runner = BenchmarkRunner(
-            client_class=self.mock_client_class,
-            num_workers=2
-        )
-        
-        workload = [("client_001", "req_001")]
-        
-        try:
-            result = runner.run_benchmark(
-                workload=workload,
-                concurrent_clients=5
-            )
-            # Should return a dict or None if not implemented
-            self.assertTrue(result is None or isinstance(result, dict))
-        except (NotImplementedError, TypeError):
-            # Expected for unimplemented method
-            pass
-    
-    def test_get_results_returns_dict(self):
-        """Test get_results returns a dictionary."""
-        runner = BenchmarkRunner(
-            client_class=self.mock_client_class,
-            num_workers=2
-        )
-        
-        result = runner.get_results()
-        
-        # Should return a dict or None if not implemented
-        self.assertTrue(result is None or isinstance(result, dict))
-    
-    def test_benchmark_runner_stores_results(self):
-        """Test that runner stores results."""
-        runner = BenchmarkRunner(
-            client_class=self.mock_client_class,
-            num_workers=2
-        )
-        
-        # Add some mock results
-        runner.results.append({"time": 0.1, "success": True})
-        runner.results.append({"time": 0.2, "success": True})
-        
-        self.assertEqual(len(runner.results), 2)
-    
-    def test_benchmark_runner_timing_attributes(self):
-        """Test that runner has timing attributes."""
-        runner = BenchmarkRunner(
-            client_class=self.mock_client_class,
-            num_workers=2
-        )
-        
+        self.assertEqual(runner.results, [])
         self.assertIsNone(runner.start_time)
         self.assertIsNone(runner.end_time)
 
+    def test_timed_send_adds_response_time(self):
+        runner = EchoRunner()
+        result = runner._timed_send({"status": "success", "seat_id": 1})
 
-class TestWorkloadIntegration(unittest.TestCase):
-    """Test workload loading integration."""
-    
-    def test_create_simple_unnumbered_workload(self):
-        """Create a simple unnumbered workload for testing."""
-        workload = [
-            ("client_001", "req_001"),
-            ("client_002", "req_002"),
-            ("client_003", "req_003"),
-        ]
-        
-        self.assertEqual(len(workload), 3)
-        self.assertEqual(workload[0][0], "client_001")
-        self.assertEqual(workload[0][1], "req_001")
-    
-    def test_create_simple_numbered_workload(self):
-        """Create a simple numbered workload for testing."""
-        workload = [
-            ("client_001", "req_001", 1),
-            ("client_002", "req_002", 2),
-            ("client_003", "req_003", 3),
-        ]
-        
-        self.assertEqual(len(workload), 3)
-        self.assertEqual(workload[0][0], "client_001")
-        self.assertEqual(workload[0][2], 1)
-    
-    def test_workload_with_edge_case_seats(self):
-        """Test workload with edge case seat numbers."""
-        workload = [
-            ("client_001", "req_001", 1),      # Min seat
-            ("client_002", "req_002", 10000),  # Mid range
-            ("client_003", "req_003", 20000),  # Max seat
-        ]
-        
-        self.assertEqual(workload[0][2], 1)
-        self.assertEqual(workload[1][2], 10000)
-        self.assertEqual(workload[2][2], 20000)
+        self.assertEqual(result["status"], "success")
+        self.assertIn("response_time", result)
+        self.assertGreaterEqual(result["response_time"], 0.0)
 
+    def test_run_benchmark_collects_success_and_duplicate(self):
+        runner = EchoRunner()
+        workload = [
+            {"status": "success", "seat_id": 1},
+            {"status": "duplicate", "seat_id": 1},
+            {"status": "failed"},
+        ]
 
-class TestBenchmarkRunnerScenarios(unittest.TestCase):
-    """Test BenchmarkRunner scenarios."""
-    
-    def test_single_worker_benchmark(self):
-        """Test benchmark with single worker."""
-        mock_client = MagicMock()
-        runner = BenchmarkRunner(client_class=mock_client, num_workers=1)
-        
-        self.assertEqual(runner.num_workers, 1)
-    
-    def test_multi_worker_benchmark(self):
-        """Test benchmark with multiple workers."""
-        mock_client = MagicMock()
-        runner = BenchmarkRunner(client_class=mock_client, num_workers=8)
-        
-        self.assertEqual(runner.num_workers, 8)
-    
-    def test_benchmark_with_empty_workload(self):
-        """Test benchmark with empty workload."""
-        mock_client = MagicMock()
-        runner = BenchmarkRunner(client_class=mock_client, num_workers=4)
-        
-        empty_workload = []
-        
+        summary = runner.run_benchmark(workload=workload, concurrent_clients=2)
+
+        self.assertEqual(summary["total_requests"], 3)
+        self.assertEqual(summary["successful_requests"], 2)
+        self.assertEqual(summary["failed_requests"], 1)
+        self.assertGreaterEqual(summary["throughput_rps"], 0)
+        self.assertIn("p95_response_time_s", summary)
+
+    def test_run_benchmark_captures_exceptions_as_error_results(self):
+        runner = EchoRunner()
+        summary = runner.run_benchmark(workload=["explode"], concurrent_clients=1)
+
+        self.assertEqual(summary["total_requests"], 1)
+        self.assertEqual(summary["failed_requests"], 1)
+        self.assertEqual(runner.results[0]["status"], "error")
+        self.assertIn("boom", runner.results[0]["message"])
+
+    def test_get_results_empty_returns_empty_dict(self):
+        runner = EchoRunner()
+        self.assertEqual(runner.get_results(), {})
+
+    def test_save_results_writes_summary_and_raw(self):
+        runner = EchoRunner()
+        runner.run_benchmark(workload=[{"status": "success"}], concurrent_clients=1)
+
+        with tempfile.NamedTemporaryFile(mode="w", delete=False, suffix=".json") as fh:
+            path = fh.name
+
         try:
-            result = runner.run_benchmark(workload=empty_workload)
-            # Should handle empty workload gracefully
-            self.assertTrue(result is None or isinstance(result, dict))
-        except (NotImplementedError, TypeError):
-            # Expected for unimplemented method
-            pass
-    
-    def test_benchmark_with_large_workload(self):
-        """Test benchmark with large workload."""
-        mock_client = MagicMock()
-        runner = BenchmarkRunner(client_class=mock_client, num_workers=4)
-        
-        # Create large workload
-        large_workload = [
-            (f"client_{i}", f"req_{i}")
-            for i in range(1000)
+            runner.save_results(path)
+            with open(path, "r") as fh2:
+                payload = json.load(fh2)
+            self.assertIn("summary", payload)
+            self.assertIn("raw", payload)
+            self.assertEqual(payload["summary"]["total_requests"], 1)
+            self.assertEqual(len(payload["raw"]), 1)
+        finally:
+            os.unlink(path)
+
+    def test_get_stats_unnumbered_computes_oversold(self):
+        runner = EchoRunner()
+        runner.results = [{"status": "success"}] * 20002 + [{"status": "failed"}]
+
+        stats = runner.get_stats_unnumbered()
+
+        self.assertEqual(stats["sold"], 20002)
+        self.assertEqual(stats["rejected"], 1)
+        self.assertEqual(stats["oversold"], 2)
+
+    def test_get_stats_numbered_detects_duplicates(self):
+        runner = EchoRunner()
+        runner.results = [
+            {"status": "success", "seat_id": 10},
+            {"status": "success", "seat_id": 10},
+            {"status": "success", "seat_id": 11},
+            {"status": "failed", "seat_id": 12},
+            {"status": "success", "seat_id": None},
         ]
-        
-        self.assertEqual(len(large_workload), 1000)
+
+        stats = runner.get_stats_numbered()
+
+        self.assertEqual(stats["sold"], 3)
+        self.assertEqual(stats["unique_seats"], 2)
+        self.assertEqual(stats["duplicate_sales"], 1)
 
 
 if __name__ == "__main__":

@@ -128,6 +128,27 @@ class TestMetricsCollector(unittest.TestCase):
         self.assertGreaterEqual(stats["p99_response_time"], 98)
         self.assertLessEqual(stats["p99_response_time"], 100)
 
+    def test_export_json_writes_statistics_file(self):
+        """Test exporting statistics to JSON file."""
+        self.collector.add_response(success=True, response_time=0.25)
+        self.collector.add_response(success=False, response_time=0.50, error="boom")
+
+        with tempfile.NamedTemporaryFile(mode="w+", suffix=".json", delete=False) as tmp:
+            tmp_path = tmp.name
+
+        try:
+            self.collector.export_json(tmp_path)
+            with open(tmp_path, "r") as fh:
+                payload = json.load(fh)
+
+            self.assertEqual(payload["total_requests"], 2)
+            self.assertEqual(payload["successful"], 1)
+            self.assertEqual(payload["failed"], 1)
+            self.assertIn("p95_response_time", payload)
+        finally:
+            if os.path.exists(tmp_path):
+                os.remove(tmp_path)
+
 
 class TestCorrectnessValidator(unittest.TestCase):
     """Test CorrectnessValidator class."""
@@ -210,6 +231,63 @@ class TestCorrectnessValidator(unittest.TestCase):
         
         self.assertFalse(result["valid"])
         self.assertTrue(result["error"])
+
+    def test_validate_numbered_sales_detects_duplicates_and_invalid(self):
+        """Test duplicate and invalid seat detection for numbered tickets."""
+        sold_seats = [1, 2, 2, 3, 0, 20001]
+
+        result = CorrectnessValidator.validate_numbered_sales(sold_seats, max_seats=20000)
+
+        self.assertFalse(result["valid"])
+        self.assertEqual(result["total_sales"], 6)
+        self.assertEqual(result["unique_seats"], 5)
+        self.assertEqual(result["duplicate_count"], 1)
+        self.assertEqual(result["invalid_seat_count"], 2)
+        self.assertIn(2, result["duplicate_seats"])
+
+    def test_validate_numbered_sales_valid_case(self):
+        """Test valid numbered sales with unique in-range seats."""
+        sold_seats = [1, 2, 10, 19999, 20000]
+
+        result = CorrectnessValidator.validate_numbered_sales(sold_seats, max_seats=20000)
+
+        self.assertTrue(result["valid"])
+        self.assertEqual(result["duplicate_count"], 0)
+        self.assertEqual(result["invalid_seat_count"], 0)
+
+    def test_compare_architectures_indirect_wins(self):
+        """Test architecture comparison and winner selection."""
+        direct = {
+            "throughput_rps": 100,
+            "total_time_s": 10.0,
+            "mean_response_time_s": 0.10,
+            "p99_response_time_s": 0.30,
+            "successful_requests": 1000,
+        }
+        indirect = {
+            "throughput_rps": 125,
+            "total_time_s": 8.0,
+            "mean_response_time_s": 0.08,
+            "p99_response_time_s": 0.20,
+            "successful_requests": 1000,
+        }
+
+        result = CorrectnessValidator.compare_architectures(direct, indirect)
+
+        self.assertEqual(result["winner_throughput"], "indirect")
+        self.assertEqual(result["direct"]["throughput_rps"], 100)
+        self.assertEqual(result["indirect"]["throughput_rps"], 125)
+        self.assertEqual(result["ratio_throughput_direct_over_indirect"], 0.8)
+
+    def test_compare_architectures_handles_zero_indirect_throughput(self):
+        """Test throughput ratio safety when indirect throughput is zero."""
+        direct = {"throughput_rps": 10}
+        indirect = {"throughput_rps": 0}
+
+        result = CorrectnessValidator.compare_architectures(direct, indirect)
+
+        self.assertEqual(result["winner_throughput"], "direct")
+        self.assertIsNone(result["ratio_throughput_direct_over_indirect"])
 
 
 if __name__ == "__main__":

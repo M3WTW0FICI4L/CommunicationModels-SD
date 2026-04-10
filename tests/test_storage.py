@@ -4,6 +4,7 @@ Unit tests for storage backend abstraction.
 
 import unittest
 from unittest.mock import Mock, MagicMock, patch
+from types import SimpleNamespace
 from src.backend.storage import StorageBackend, RedisBackend
 
 
@@ -258,6 +259,108 @@ class TestRedisBackendInterface(unittest.TestCase):
                 f"RedisBackend missing method: {method_name}"
             )
             self.assertTrue(callable(getattr(backend, method_name)))
+
+
+class TestRedisBackendBehavior(unittest.TestCase):
+    """Behavior tests for RedisBackend using mocked Redis client."""
+
+    def test_connect_registers_lua_script_and_pings(self):
+        fake_client = MagicMock()
+        fake_script = MagicMock()
+        fake_client.register_script.return_value = fake_script
+
+        fake_redis_module = SimpleNamespace(Redis=MagicMock(return_value=fake_client))
+        backend = RedisBackend(host="h", port=1234, db=9)
+
+        with patch.dict("sys.modules", {"redis": fake_redis_module}):
+            backend.connect()
+
+        fake_redis_module.Redis.assert_called_once_with(
+            host="h", port=1234, db=9, decode_responses=True
+        )
+        fake_client.ping.assert_called_once()
+        fake_client.register_script.assert_called_once()
+        self.assertIs(backend.client, fake_client)
+        self.assertIs(backend._incr_script, fake_script)
+
+    def test_disconnect_closes_client_and_clears_reference(self):
+        backend = RedisBackend()
+        mock_client = MagicMock()
+        backend.client = mock_client
+
+        backend.disconnect()
+
+        mock_client.close.assert_called_once()
+        self.assertIsNone(backend.client)
+
+    def test_get_unnumbered_count_handles_missing_and_existing_value(self):
+        backend = RedisBackend()
+        backend.client = MagicMock()
+
+        backend.client.get.return_value = None
+        self.assertEqual(backend.get_unnumbered_count(), 0)
+
+        backend.client.get.return_value = "7"
+        self.assertEqual(backend.get_unnumbered_count(), 7)
+
+    def test_increment_unnumbered_uses_registered_script(self):
+        backend = RedisBackend()
+        backend._incr_script = MagicMock(return_value=1)
+
+        self.assertTrue(backend.increment_unnumbered())
+        backend._incr_script.assert_called_once_with(
+            keys=["tickets:unnumbered:count"], args=[backend.MAX_TICKETS]
+        )
+
+    def test_set_numbered_seat_returns_true_only_on_first_claim(self):
+        backend = RedisBackend()
+        backend.client = MagicMock()
+
+        backend.client.set.return_value = True
+        self.assertTrue(backend.set_numbered_seat(42))
+
+        backend.client.set.return_value = None
+        self.assertFalse(backend.set_numbered_seat(42))
+
+    def test_is_numbered_seat_sold_maps_exists_to_boolean(self):
+        backend = RedisBackend()
+        backend.client = MagicMock()
+
+        backend.client.exists.return_value = 1
+        self.assertTrue(backend.is_numbered_seat_sold(1))
+
+        backend.client.exists.return_value = 0
+        self.assertFalse(backend.is_numbered_seat_sold(2))
+
+    def test_reset_deletes_counter_and_all_scanned_numbered_keys(self):
+        backend = RedisBackend()
+        backend.client = MagicMock()
+
+        backend.client.scan.side_effect = [
+            (1, ["tickets:numbered:1", "tickets:numbered:2"]),
+            (0, ["tickets:numbered:3"]),
+        ]
+
+        backend.reset()
+
+        backend.client.delete.assert_any_call("tickets:unnumbered:count")
+        backend.client.delete.assert_any_call("tickets:numbered:1", "tickets:numbered:2")
+        backend.client.delete.assert_any_call("tickets:numbered:3")
+
+    def test_get_stats_aggregates_unnumbered_remaining_and_numbered_sold(self):
+        backend = RedisBackend()
+        backend.client = MagicMock()
+        backend.client.get.return_value = "3"
+        backend.client.scan_iter.return_value = iter([
+            "tickets:numbered:10",
+            "tickets:numbered:11",
+        ])
+
+        stats = backend.get_stats()
+
+        self.assertEqual(stats["unnumbered_sold"], 3)
+        self.assertEqual(stats["unnumbered_remaining"], 19997)
+        self.assertEqual(stats["numbered_sold"], 2)
 
 
 if __name__ == "__main__":
