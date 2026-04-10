@@ -34,19 +34,30 @@ os.makedirs(PLOTS_DIR, exist_ok=True)
 # ---------------------------------------------------------------------------
 
 def load_results(directory: str) -> list[dict]:
-    """Load all JSON result files from a directory."""
+    """Load all JSON result files from a directory recursively."""
     out = []
-    for path in glob.glob(os.path.join(directory, "*.json")):
+    for path in glob.glob(os.path.join(directory, "**", "*.json"), recursive=True):
         with open(path) as fh:
             data = json.load(fh)
         summary = data.get("summary", data)
         # Extract concurrency and ticket type from filename
         fname = os.path.basename(path)
-        m = re.search(r"(unnumbered|numbered)_c(\d+)", fname)
+        # Supports both legacy format: <type>_cX_timestamp.json
+        # and new format: results/<arch>/<type>/cX_timestamp.json
+        parent_type = os.path.basename(os.path.dirname(path))
+        if parent_type in {"unnumbered", "numbered"}:
+            summary["_ticket_type"] = parent_type
+
+        m = re.search(r"(?:^|_)?c(\d+)", fname)
         if m:
-            summary["_ticket_type"] = m.group(1)
-            summary["_concurrency"] = int(m.group(2))
-            summary["_file"] = fname
+            summary["_concurrency"] = int(m.group(1))
+
+        if "_ticket_type" not in summary:
+            m_type = re.search(r"(unnumbered|numbered)", fname)
+            if m_type:
+                summary["_ticket_type"] = m_type.group(1)
+
+        summary["_file"] = fname
         out.append(summary)
     return out
 

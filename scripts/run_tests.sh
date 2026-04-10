@@ -15,6 +15,14 @@ cd "$ROOT_DIR" || exit 1
 echo -e "${YELLOW}Running Unit Tests from $ROOT_DIR ...${NC}"
 echo "======================================"
 
+TEST_RESULTS_DIR="results/tests"
+TIMESTAMP=$(date +%Y%m%d_%H%M%S)
+TEST_LOG="${TEST_RESULTS_DIR}/pytest_${TIMESTAMP}.log"
+JUNIT_XML="${TEST_RESULTS_DIR}/junit_${TIMESTAMP}.xml"
+COV_HTML_DIR="${TEST_RESULTS_DIR}/htmlcov_${TIMESTAMP}"
+
+mkdir -p "$TEST_RESULTS_DIR"
+
 # Ensure local venv exists (if possible)
 if [ -d ".venv" ] && [ -x ".venv/bin/python" ]; then
     PYTHON=".venv/bin/python"
@@ -81,15 +89,39 @@ else
     fi
 fi
 
+# Ensure pytest-cov is available when coverage flags are used.
+if ! ${PYTEST_CMD} --help 2>/dev/null | grep -q -- '--cov'; then
+    echo -e "${YELLOW}pytest-cov not found. Installing into active environment...${NC}"
+    INSTALL_OUT=$(${PIP} install pytest-cov 2>&1 || true)
+    if echo "${INSTALL_OUT}" | grep -qi "externally-managed-environment"; then
+        echo -e "${RED}Error: pip operation blocked by Debian 'externally-managed-environment'.${NC}"
+        echo "Please do one of the following:"
+        echo "  1) sudo apt install python3-pytest-cov"
+        echo "  2) python3 -m pip install --user --break-system-packages pytest-cov"
+        echo "  3) recreate the local venv and install requirements.txt"
+        exit 1
+    fi
+
+    if ! ${PYTEST_CMD} --help 2>/dev/null | grep -q -- '--cov'; then
+        echo -e "${RED}pytest-cov still not available after install attempt.${NC}"
+        echo "Install pytest-cov manually in your environment and retry."
+        exit 1
+    fi
+fi
+
 # Run tests with coverage
 echo -e "${YELLOW}Running tests with coverage...${NC}"
-${PYTEST_CMD} tests/ -v --cov=src --cov-report=term-missing --cov-report=html
-
-# Check exit code
-if [ $? -eq 0 ]; then
+if ${PYTEST_CMD} tests/ -v \
+    --cov=src \
+    --cov-report=term-missing \
+    --cov-report="html:${COV_HTML_DIR}" \
+    --junitxml="${JUNIT_XML}" | tee "${TEST_LOG}"; then
     echo -e "${GREEN}✓ All tests passed!${NC}"
 else
     echo -e "${RED}✗ Some tests failed!${NC}"
+    echo "Test log: ${TEST_LOG}"
+    echo "JUnit XML: ${JUNIT_XML}"
+    echo "Coverage HTML: ${COV_HTML_DIR}/index.html"
     exit 1
 fi
 
@@ -104,4 +136,7 @@ echo "- Backend core tests: tests/test_backend.py"
 echo "- TicketManager tests: tests/test_ticket_manager.py"
 echo "- Benchmark tests: tests/test_benchmark.py"
 echo ""
-echo "Coverage report: coverage_html/index.html"
+echo "Results saved to: ${TEST_RESULTS_DIR}/"
+echo "- Test log: ${TEST_LOG}"
+echo "- JUnit XML: ${JUNIT_XML}"
+echo "- Coverage report: ${COV_HTML_DIR}/index.html"

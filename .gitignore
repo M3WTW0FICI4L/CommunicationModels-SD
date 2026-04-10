@@ -2,10 +2,11 @@
 ## Python
 .venv/
 .pytest_cache/
+__pycache__/
 */.venv/
 */.pytest_cache/
-__pycache__/
 */__pycache__/
+
 *.pyc
 *.pyo
 *.pyd
@@ -13,10 +14,9 @@ __pycache__/
 *.coverage
 coverage.xml
 htmlcov/
-results/*/*.json
-results/*/*.xml
-results/*/*.html
-
+results/**
+!results/**/
+!results/**/.gitkeep
 
 ## Base ignores for Visual Studio
 # User-specific files

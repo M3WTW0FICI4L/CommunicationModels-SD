@@ -116,14 +116,43 @@ install_docker_compose() {
 
 setup_docker_permissions() {
     log_info "Setting up Docker permissions..."
-    
-    if ! groups | grep -q docker; then
-        log_warning "User not in docker group. Adding..."
-        sudo usermod -aG docker "$USER"
-        log_warning "⚠ You must logout and login for group changes to take effect"
-        log_warning "⚠ Or run: newgrp docker"
+
+    # When run with sudo, SUDO_USER is the real user; otherwise use $USER
+    local REAL_USER="${SUDO_USER:-$USER}"
+
+    # Create the docker group if it does not exist
+    if ! getent group docker >/dev/null 2>&1; then
+        log_warning "docker group does not exist. Creating..."
+        sudo groupadd docker
+        log_success "docker group created"
     else
-        log_success "User already in docker group"
+        log_success "docker group already exists"
+    fi
+
+    # Add real user to docker group
+    if id -nG "$REAL_USER" 2>/dev/null | grep -qw docker; then
+        log_success "User '$REAL_USER' already in docker group"
+    else
+        log_warning "Adding '$REAL_USER' to docker group..."
+        sudo usermod -aG docker "$REAL_USER"
+        log_success "User '$REAL_USER' added to docker group"
+        log_warning "Group takes effect in new sessions. For this session run: newgrp docker"
+    fi
+
+    # Fix socket group ownership so current session can use Docker now
+    if [ -S /var/run/docker.sock ]; then
+        local SOCK_GID
+        SOCK_GID=$(stat -c '%g' /var/run/docker.sock)
+        local DOCKER_GID
+        DOCKER_GID=$(getent group docker | cut -d: -f3)
+
+        if [ "$SOCK_GID" != "$DOCKER_GID" ]; then
+            log_warning "Socket group mismatch (sock GID=$SOCK_GID, docker GID=$DOCKER_GID). Fixing..."
+            sudo chown root:docker /var/run/docker.sock
+            log_success "Docker socket group fixed"
+        else
+            log_success "Docker socket group is correct"
+        fi
     fi
 }
 
@@ -131,27 +160,67 @@ setup_docker_permissions() {
 # Service management
 # ---------------------------------------------------------------------------
 
+# Detect whether Docker was installed via Snap or via systemd package
+_docker_is_snap() {
+    snap list docker >/dev/null 2>&1
+}
+
 start_docker_daemon() {
     log_info "Ensuring Docker daemon is running..."
-    
-    if command -v systemctl >/dev/null 2>&1; then
-        sudo systemctl start docker
-        sudo systemctl enable docker
+
+    if _docker_is_snap; then
+        log_info "Docker is installed via Snap."
+        if ! snap services docker.dockerd 2>/dev/null | grep -q 'active'; then
+            log_warning "Starting Snap docker.dockerd service..."
+            sudo snap start docker.dockerd
+            sleep 3
+        fi
+        # Snap daemon already runs with --group docker; no daemon.json needed
+        log_success "Docker (Snap) daemon is running"
+
+    elif command -v systemctl >/dev/null 2>&1; then
+        if ! systemctl is-active --quiet docker 2>/dev/null; then
+            log_warning "Starting Docker daemon via systemctl..."
+            sudo systemctl start docker
+        fi
+        sudo systemctl enable docker 2>/dev/null || true
+
+        # Configure daemon socket group if not already set
+        local DAEMON_JSON="/etc/docker/daemon.json"
+        if [ ! -f "$DAEMON_JSON" ] || ! grep -q '"group"' "$DAEMON_JSON" 2>/dev/null; then
+            log_info "Configuring Docker daemon socket group in $DAEMON_JSON..."
+            if [ -f "$DAEMON_JSON" ]; then
+                sudo python3 -c "
+import json
+with open('$DAEMON_JSON') as f: d=json.load(f)
+d['group']='docker'
+with open('$DAEMON_JSON','w') as f: json.dump(d,f,indent=2)
+"
+            else
+                echo '{"group":"docker"}' | sudo tee "$DAEMON_JSON" >/dev/null
+            fi
+            sudo systemctl restart docker
+            sleep 2
+        fi
         log_success "Docker daemon started and enabled"
     else
-        log_warning "systemctl not available; Docker daemon management may differ"
+        log_warning "Neither Snap nor systemctl detected; Docker daemon management may differ"
     fi
 }
 
 restart_docker() {
     log_info "Restarting Docker..."
-    
-    if command -v systemctl >/dev/null 2>&1; then
+
+    if _docker_is_snap; then
+        sudo snap restart docker
+        sleep 3
+        log_success "Docker (Snap) restarted"
+    elif command -v systemctl >/dev/null 2>&1; then
         sudo systemctl restart docker
         sleep 2
         log_success "Docker restarted"
     else
-        log_error "Cannot restart Docker without systemctl"
+        log_error "Cannot restart Docker: neither Snap nor systemctl available"
         exit 1
     fi
 }
@@ -179,25 +248,39 @@ check_docker_compose_install() {
 }
 
 check_docker_daemon() {
-    if ! docker ps >/dev/null 2>&1; then
-        log_error "Docker daemon not accessible (permission denied or not running)"
-        return 1
+    if docker ps >/dev/null 2>&1; then
+        log_success "Docker daemon is accessible"
+        return 0
     fi
-    log_success "Docker daemon is accessible"
-    return 0
+
+    if sg docker -c "docker ps" >/dev/null 2>&1; then
+        log_warning "Docker daemon is accessible via 'sg docker'; current shell has not reloaded docker group yet"
+        return 0
+    fi
+
+    log_error "Docker daemon not accessible (daemon down or session lacks valid permissions)"
+    return 1
 }
 
 check_docker_socket_permissions() {
     if [ -S /var/run/docker.sock ]; then
-        if [ -r /var/run/docker.sock ] && [ -w /var/run/docker.sock ]; then
+        local SOCK_GID
+        SOCK_GID=$(stat -c '%g' /var/run/docker.sock)
+        local USER_GROUPS
+        USER_GROUPS=$(id -G "$USER")
+
+        if echo "$USER_GROUPS" | grep -qw "$SOCK_GID"; then
             log_success "Docker socket has correct permissions"
             return 0
+        elif sg docker -c "docker ps" >/dev/null 2>&1; then
+            log_warning "Docker socket is usable via 'sg docker'; current shell groups are stale until re-login/newgrp"
+            return 0
         else
-            log_warning "Docker socket exists but insufficient permissions"
+            log_warning "Docker socket group GID=$SOCK_GID not in current session's groups: $USER_GROUPS"
             return 1
         fi
     else
-        log_error "Docker socket not found"
+        log_error "Docker socket not found at /var/run/docker.sock"
         return 1
     fi
 }
@@ -244,8 +327,7 @@ main() {
     
     # Check socket permissions
     if ! check_docker_socket_permissions; then
-        log_warning "Restarting Docker to fix socket permissions..."
-        restart_docker
+        log_warning "Docker socket still not usable in this session. Use: sg docker -c 'bash' or log out/in."
     fi
     
     # Final validation
@@ -255,14 +337,31 @@ main() {
     echo "=========================================="
     docker --version
     docker compose version
-    docker ps
-    
+
+    # Run docker ps - use sg docker if needed for current session
+    if docker ps >/dev/null 2>&1; then
+        docker ps
+    elif sg docker -c "docker ps" >/dev/null 2>&1; then
+        log_warning "Docker group active via 'sg docker' (re-login for permanent access)"
+        sg docker -c "docker ps"
+    else
+        log_warning "Cannot list containers yet. Re-login or run: sg docker -c 'docker ps'"
+    fi
+
     echo ""
     log_success "Docker setup complete and healthy!"
     echo ""
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo "  IMPORTANT: Apply docker group to current session"
+    echo "  Run: sg docker -c 'bash'   (temporary, this terminal)"
+    echo "  Or:  newgrp docker          (replace current shell)"
+    echo "  Or:  logout and login again (permanent)"
+    echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+    echo ""
     echo "Next steps:"
-    echo "  1. Direct architecture:  docker compose -f docker/docker-compose.direct.yml up -d --build"
-    echo "  2. Indirect architecture: docker compose -f docker/docker-compose.indirect.yml up -d --build --scale worker=4"
+    echo "  1. Direct architecture:   sg docker -c 'docker compose -f docker/docker-compose.direct.yml up -d --build'"
+    echo "  2. Indirect architecture: sg docker -c 'docker compose -f docker/docker-compose.indirect.yml up -d --build --scale worker=4'"
+    echo "  3. Run benchmarks:        sg docker -c './scripts/run_all_benchmarks.sh true'"
     echo ""
 }
 

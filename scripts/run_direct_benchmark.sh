@@ -23,7 +23,7 @@ fi
 TICKET_TYPE="${1:-unnumbered}"
 CONCURRENT="${2:-50}"
 API_URL="${3:-http://localhost:80}"
-RESULTS_DIR="results/direct"
+RESULTS_DIR="results/direct/${TICKET_TYPE}"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 
 mkdir -p "$RESULTS_DIR"
@@ -46,7 +46,7 @@ echo "  API URL     : $API_URL"
 echo "  Workload    : $WORKLOAD"
 echo ""
 
-OUTPUT="${RESULTS_DIR}/${TICKET_TYPE}_c${CONCURRENT}_${TIMESTAMP}.json"
+OUTPUT="${RESULTS_DIR}/c${CONCURRENT}_${TIMESTAMP}.json"
 
 if ! curl -fsS "${API_URL}/health" >/dev/null; then
     echo "Error: API not reachable at ${API_URL}. Start direct API first."

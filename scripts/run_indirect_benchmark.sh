@@ -23,7 +23,7 @@ fi
 
 TICKET_TYPE="${1:-unnumbered}"
 CONCURRENT="${2:-50}"
-RESULTS_DIR="results/indirect"
+RESULTS_DIR="results/indirect/${TICKET_TYPE}"
 TIMESTAMP=$(date +%Y%m%d_%H%M%S)
 RABBITMQ_HOST="${RABBITMQ_HOST:-localhost}"
 RABBITMQ_PORT="${RABBITMQ_PORT:-5672}"
@@ -47,7 +47,7 @@ echo "  Concurrency : $CONCURRENT"
 echo "  Workload    : $WORKLOAD"
 echo ""
 
-OUTPUT="${RESULTS_DIR}/${TICKET_TYPE}_c${CONCURRENT}_${TIMESTAMP}.json"
+OUTPUT="${RESULTS_DIR}/c${CONCURRENT}_${TIMESTAMP}.json"
 
 # Ensure RabbitMQ is reachable before launching benchmark
 if ! timeout 2 bash -c "</dev/tcp/${RABBITMQ_HOST}/${RABBITMQ_PORT}" 2>/dev/null; then
@@ -58,8 +58,11 @@ fi
 
 echo "Checking worker availability (best-effort)..."
 if ! docker ps --format '{{.Names}}' 2>/dev/null | grep -q 'worker'; then
-    echo "Warning: no worker container name detected via docker ps."
-    echo "Benchmark can publish messages, but without workers responses may timeout."
+    if sg docker -c "docker ps --format '{{.Names}}'" 2>/dev/null | grep -q 'worker'; then
+        echo "Workers detected (via sg docker)"
+    else
+        echo "Warning: no worker container detected. Benchmark may timeout waiting for responses."
+    fi
 fi
 
 "$PYTHON_BIN" -m src.main \
