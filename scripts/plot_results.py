@@ -3,9 +3,12 @@
 Plot benchmark results collected in results/direct/ and results/indirect/.
 
 Produces:
-  results/plots/throughput_vs_concurrency.png
-  results/plots/direct_vs_indirect.png
+  results/plots/throughput_vs_concurrency_direct.png
+  results/plots/throughput_vs_concurrency_indirect.png
+  results/plots/direct_vs_indirect_unnumbered.png
+  results/plots/direct_vs_indirect_numbered.png
   results/plots/numbered_vs_unnumbered.png
+  results/plots/latency_p95_comparison.png
 
 Usage:
     python scripts/plot_results.py
@@ -22,9 +25,11 @@ import matplotlib.pyplot as plt
 import numpy as np
 
 
-RESULTS_DIR_DIRECT   = "results/direct"
-RESULTS_DIR_INDIRECT = "results/indirect"
-PLOTS_DIR            = "results/plots"
+_REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+RESULTS_DIR_DIRECT   = os.path.join(_REPO_ROOT, "results", "direct")
+RESULTS_DIR_INDIRECT = os.path.join(_REPO_ROOT, "results", "indirect")
+PLOTS_DIR            = os.path.join(_REPO_ROOT, "results", "plots")
 
 os.makedirs(PLOTS_DIR, exist_ok=True)
 
@@ -73,11 +78,15 @@ def group_by(records: list[dict], key: str) -> dict:
 
 
 # ---------------------------------------------------------------------------
-# Plot 1: Throughput vs Concurrency (direct, both ticket types)
+# Plot 1: Throughput vs Concurrency (per architecture, both ticket types)
 # ---------------------------------------------------------------------------
 
-def plot_throughput_vs_concurrency(direct_results: list[dict]) -> None:
-    by_type = group_by(direct_results, "_ticket_type")
+def plot_throughput_vs_concurrency(
+    results: list[dict],
+    arch_label: str = "Direct Architecture",
+    filename: str = "throughput_vs_concurrency_direct.png",
+) -> None:
+    by_type = group_by(results, "_ticket_type")
 
     fig, ax = plt.subplots(figsize=(8, 5))
     for ticket_type, records in sorted(by_type.items()):
@@ -88,10 +97,10 @@ def plot_throughput_vs_concurrency(direct_results: list[dict]) -> None:
 
     ax.set_xlabel("Concurrent Clients")
     ax.set_ylabel("Throughput (req/s)")
-    ax.set_title("Direct Architecture – Throughput vs Concurrency")
+    ax.set_title(f"{arch_label} – Throughput vs Concurrency")
     ax.legend()
     ax.grid(True, linestyle="--", alpha=0.5)
-    path = os.path.join(PLOTS_DIR, "throughput_vs_concurrency.png")
+    path = os.path.join(PLOTS_DIR, filename)
     fig.tight_layout()
     fig.savefig(path, dpi=150)
     plt.close(fig)
@@ -138,7 +147,7 @@ def plot_direct_vs_indirect(
     ax.set_title(f"Direct vs Indirect – {ticket_type.capitalize()} Tickets")
     ax.legend()
     ax.grid(True, linestyle="--", alpha=0.5)
-    path = os.path.join(PLOTS_DIR, "direct_vs_indirect.png")
+    path = os.path.join(PLOTS_DIR, f"direct_vs_indirect_{ticket_type}.png")
     fig.tight_layout()
     fig.savefig(path, dpi=150)
     plt.close(fig)
@@ -192,6 +201,63 @@ def plot_numbered_vs_unnumbered(direct_results: list[dict]) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Plot 4: P95 latency comparison across concurrency levels
+# ---------------------------------------------------------------------------
+
+def plot_latency_comparison(
+    direct_results: list[dict],
+    indirect_results: list[dict],
+    ticket_type: str = "unnumbered",
+) -> None:
+    def _filter_sort(records, ttype):
+        filtered = [r for r in records if r.get("_ticket_type") == ttype]
+        filtered.sort(key=lambda r: r.get("_concurrency", 0))
+        return filtered
+
+    d_recs = _filter_sort(direct_results, ticket_type)
+    i_recs = _filter_sort(indirect_results, ticket_type)
+
+    if not d_recs and not i_recs:
+        print("No latency data – skipping latency comparison plot.")
+        return
+
+    fig, ax = plt.subplots(figsize=(8, 5))
+    if d_recs:
+        ax.plot(
+            [r["_concurrency"] for r in d_recs],
+            [r.get("p95_response_time_s", 0) * 1000 for r in d_recs],
+            marker="o", label="Direct p95",
+        )
+        ax.plot(
+            [r["_concurrency"] for r in d_recs],
+            [r.get("mean_response_time_s", 0) * 1000 for r in d_recs],
+            marker="o", linestyle="--", label="Direct mean",
+        )
+    if i_recs:
+        ax.plot(
+            [r["_concurrency"] for r in i_recs],
+            [r.get("p95_response_time_s", 0) * 1000 for r in i_recs],
+            marker="s", label="Indirect p95",
+        )
+        ax.plot(
+            [r["_concurrency"] for r in i_recs],
+            [r.get("mean_response_time_s", 0) * 1000 for r in i_recs],
+            marker="s", linestyle="--", label="Indirect mean",
+        )
+
+    ax.set_xlabel("Concurrent Clients")
+    ax.set_ylabel("Latency (ms)")
+    ax.set_title(f"Latency Comparison – {ticket_type.capitalize()} Tickets")
+    ax.legend()
+    ax.grid(True, linestyle="--", alpha=0.5)
+    path = os.path.join(PLOTS_DIR, f"latency_p95_comparison_{ticket_type}.png")
+    fig.tight_layout()
+    fig.savefig(path, dpi=150)
+    plt.close(fig)
+    print(f"Saved: {path}")
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -202,8 +268,22 @@ if __name__ == "__main__":
     print(f"Loaded {len(direct)} direct result(s), {len(indirect)} indirect result(s)")
 
     if direct:
-        plot_throughput_vs_concurrency(direct)
+        plot_throughput_vs_concurrency(
+            direct,
+            arch_label="Direct Architecture",
+            filename="throughput_vs_concurrency_direct.png",
+        )
         plot_numbered_vs_unnumbered(direct)
-    plot_direct_vs_indirect(direct, indirect, ticket_type="unnumbered")
+
+    if indirect:
+        plot_throughput_vs_concurrency(
+            indirect,
+            arch_label="Indirect Architecture (RabbitMQ)",
+            filename="throughput_vs_concurrency_indirect.png",
+        )
+
+    for ttype in ("unnumbered", "numbered"):
+        plot_direct_vs_indirect(direct, indirect, ticket_type=ttype)
+        plot_latency_comparison(direct, indirect, ticket_type=ttype)
 
     print("Done.")
