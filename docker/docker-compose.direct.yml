@@ -1,20 +1,11 @@
-# Direct Communication Architecture
-# ─────────────────────────────────────────────────────────────────────────────
-# Topology:
-#   Client → NGINX (port 80) → api-1, api-2, api-3 → Redis
-#
-# Scale API workers with:
-#   docker compose -f docker-compose.direct.yml up --scale api=4
-# ─────────────────────────────────────────────────────────────────────────────
-
 services:
 
   redis:
     image: redis:7-alpine
     container_name: ticket-redis
     command: redis-server --save "" --loglevel warning
-    ports:
-      - "6379:6379"
+    security_opt:
+      - apparmor:unconfined
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 5s
@@ -25,6 +16,8 @@ services:
     build:
       context: ..
       dockerfile: docker/Dockerfile.api
+    security_opt:
+      - apparmor:unconfined
     environment:
       REDIS_HOST: redis
       REDIS_PORT: 6379
@@ -42,6 +35,8 @@ services:
   nginx:
     image: nginx:1.25-alpine
     container_name: ticket-nginx
+    security_opt:
+      - apparmor:unconfined
     ports:
       - "80:80"
     volumes:

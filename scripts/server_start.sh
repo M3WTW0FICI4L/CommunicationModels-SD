@@ -37,8 +37,8 @@ docker_cmd() {
     sg docker -c "cd '$ROOT_DIR' && docker $*"
 }
 
-compose_direct()   { docker_cmd compose -f docker/docker-compose.direct.yml   "$@"; }
-compose_indirect() { docker_cmd compose -f docker/docker-compose.indirect.yml "$@"; }
+compose_direct()   { docker_cmd compose -p ticket-direct   -f docker/docker-compose.direct.yml   "$@"; }
+compose_indirect() { docker_cmd compose -p ticket-indirect -f docker/docker-compose.indirect.yml "$@"; }
 
 wait_healthy() {
     local service="$1" url="$2" retries="${3:-30}"

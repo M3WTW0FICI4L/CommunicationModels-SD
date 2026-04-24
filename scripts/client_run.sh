@@ -111,8 +111,11 @@ try:
     conn = pika.BlockingConnection(pika.URLParameters(url))
     ch = conn.channel()
     for q in ("ticket_purchases", "ticket_responses"):
-        ch.queue_declare(queue=q, durable=True)
-        ch.queue_purge(queue=q)
+        try:
+            ch.queue_declare(queue=q, passive=True)  # check without altering args
+            ch.queue_purge(queue=q)
+        except Exception:
+            pass  # queue does not exist yet, nothing to purge
     conn.close()
     print("Cues RabbitMQ purgades")
 except Exception as e:

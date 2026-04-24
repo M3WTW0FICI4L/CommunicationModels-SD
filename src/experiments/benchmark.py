@@ -3,6 +3,7 @@ Benchmark execution and workload simulation.
 """
 
 import json
+import threading
 import time
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any, Dict, List, Optional, Tuple
@@ -302,22 +303,28 @@ class IndirectBenchmark(BenchmarkRunner):
         wait_timeout: int = 300,
     ) -> Dict[str, Any]:  # type: ignore[override]
         """
-        1. Publish all messages to RabbitMQ.
+        1. Publish all messages to RabbitMQ, recording per-request send timestamps.
         2. Wait for all responses to land in the response queue.
-        3. Return aggregated results.
+        3. Compute end-to-end latency per request and return aggregated results.
         """
         self.results = []
         self._producer.connect()
         self.start_time = time.perf_counter()
 
-        # Use thread pool to publish in parallel for speed
+        # Track per-request send timestamps for latency calculation
+        send_times: Dict[str, float] = {}
+        send_times_lock = threading.Lock()
+
         def _send(item):
+            t0 = time.perf_counter()
             if len(item) == 2:
                 client_id, request_id = item
                 self._producer.send_unnumbered_request(client_id, request_id)
             else:
                 client_id, request_id, seat_id = item
                 self._producer.send_numbered_request(client_id, request_id, int(seat_id))
+            with send_times_lock:
+                send_times[request_id] = t0
 
         with ThreadPoolExecutor(max_workers=concurrent_clients) as pool:
             list(pool.map(_send, workload))
@@ -330,21 +337,23 @@ class IndirectBenchmark(BenchmarkRunner):
         )
 
         self.results = self.wait_for_responses(
-            expected=len(workload), timeout=wait_timeout
+            expected=len(workload), timeout=wait_timeout, send_times=send_times
         )
         self.end_time = time.perf_counter()
         self._producer.disconnect()
         return self.get_results()
 
     def wait_for_responses(
-        self, expected: int, timeout: int = 300
+        self,
+        expected: int,
+        timeout: int = 300,
+        send_times: Optional[Dict[str, float]] = None,
     ) -> List[Dict[str, Any]]:
         """
         Drain the response queue until *expected* messages are collected
-        or *timeout* seconds elapse.
+        or *timeout* seconds elapse.  Uses send_times to compute per-request
+        end-to-end latency.
         """
-        import pika
-
         responses: List[Dict[str, Any]] = []
         mgr = self._QueueManager()
         mgr.connect(
@@ -362,6 +371,13 @@ class IndirectBenchmark(BenchmarkRunner):
             if method:
                 try:
                     data = json.loads(body.decode())
+                    # Compute end-to-end latency using the recorded send timestamp
+                    t_recv = time.perf_counter()
+                    req_id = data.get("request_id")
+                    if send_times and req_id and req_id in send_times:
+                        data["response_time"] = t_recv - send_times[req_id]
+                    else:
+                        data["response_time"] = 0.0
                     responses.append(data)
                 except Exception:
                     pass

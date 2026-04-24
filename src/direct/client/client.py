@@ -54,7 +54,13 @@ class DirectClient:
                 params=params,
                 timeout=Config.REQUEST_TIMEOUT,
             )
-            return resp.json()
+            # Intentar deserialitzar JSON; si falla mostrar el text real
+            try:
+                return resp.json()
+            except ValueError:
+                body = resp.text[:300] if resp.text else "(buit)"
+                logger.error(f"Resposta no-JSON HTTP {resp.status_code}: {body}")
+                return {"status": "error", "message": f"HTTP {resp.status_code}: {body}"}
         except requests.RequestException as e:
             logger.error(f"Buy request failed: {e}")
             return {"status": "error", "message": str(e)}
