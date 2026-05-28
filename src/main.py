@@ -124,7 +124,9 @@ def run_benchmark_direct(args) -> None:
 
     from src.experiments.benchmark import DirectBenchmark, WorkloadLoader
 
-    logger.info(f"Direct benchmark: {args.workload} | clients={args.concurrent_clients}")
+    logger.info(
+        f"Direct benchmark: {args.workload} | clients={args.concurrent_clients}"
+    )
 
     bench = DirectBenchmark(api_url=args.api_url, num_workers=args.concurrent_clients)
 
@@ -147,7 +149,9 @@ def run_benchmark_indirect(args) -> None:
 
     from src.experiments.benchmark import IndirectBenchmark, WorkloadLoader
 
-    logger.info(f"Indirect benchmark: {args.workload} | clients={args.concurrent_clients}")
+    logger.info(
+        f"Indirect benchmark: {args.workload} | clients={args.concurrent_clients}"
+    )
 
     bench = IndirectBenchmark(num_workers=args.concurrent_clients)
 

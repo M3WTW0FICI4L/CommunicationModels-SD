@@ -172,8 +172,12 @@ class BenchmarkRunner:
             "mean_response_time_s": round(mean_rt, 4),
             "p95_response_time_s": round(p95, 4),
             "p99_response_time_s": round(p99, 4),
-            "min_response_time_s": round(min(response_times), 4) if response_times else 0,
-            "max_response_time_s": round(max(response_times), 4) if response_times else 0,
+            "min_response_time_s": (
+                round(min(response_times), 4) if response_times else 0
+            ),
+            "max_response_time_s": (
+                round(max(response_times), 4) if response_times else 0
+            ),
         }
 
     def save_results(self, path: str) -> None:
@@ -322,7 +326,9 @@ class IndirectBenchmark(BenchmarkRunner):
                 self._producer.send_unnumbered_request(client_id, request_id)
             else:
                 client_id, request_id, seat_id = item
-                self._producer.send_numbered_request(client_id, request_id, int(seat_id))
+                self._producer.send_numbered_request(
+                    client_id, request_id, int(seat_id)
+                )
             with send_times_lock:
                 send_times[request_id] = t0
 

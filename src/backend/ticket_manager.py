@@ -38,7 +38,9 @@ class TicketManager:
         # Idempotency check
         if request.request_id in self.processed_requests:
             cached = self.processed_requests[request.request_id]
-            logger.debug(f"Duplicate request {request.request_id}, returning cached response")
+            logger.debug(
+                f"Duplicate request {request.request_id}, returning cached response"
+            )
             return BuyResponse(
                 request_id=cached.request_id,
                 client_id=cached.client_id,

@@ -36,15 +36,31 @@ class DirectClient:
     # Core requests
     # ------------------------------------------------------------------
 
-    def buy_unnumbered(self, client_id: str, request_id: str) -> Dict[str, Any]:
+    def buy_unnumbered(
+        self,
+        client_id: str,
+        request_id: str,
+    ) -> Dict[str, Any]:
         """Purchase an unnumbered ticket."""
-        return self._buy(client_id=client_id, request_id=request_id,
-                         ticket_type="unnumbered")
+        return self._buy(
+            client_id=client_id,
+            request_id=request_id,
+            ticket_type="unnumbered",
+        )
 
-    def buy_numbered(self, client_id: str, request_id: str, seat_id: int) -> Dict[str, Any]:
+    def buy_numbered(
+        self,
+        client_id: str,
+        request_id: str,
+        seat_id: int,
+    ) -> Dict[str, Any]:
         """Purchase a specific numbered seat."""
-        return self._buy(client_id=client_id, request_id=request_id,
-                         ticket_type="numbered", seat_id=seat_id)
+        return self._buy(
+            client_id=client_id,
+            request_id=request_id,
+            ticket_type="numbered",
+            seat_id=seat_id,
+        )
 
     def _buy(self, **params) -> Dict[str, Any]:
         """Low-level POST /buy helper."""
@@ -60,7 +76,10 @@ class DirectClient:
             except ValueError:
                 body = resp.text[:300] if resp.text else "(buit)"
                 logger.error(f"Resposta no-JSON HTTP {resp.status_code}: {body}")
-                return {"status": "error", "message": f"HTTP {resp.status_code}: {body}"}
+                return {
+                    "status": "error",
+                    "message": f"HTTP {resp.status_code}: {body}",
+                }
         except requests.RequestException as e:
             logger.error(f"Buy request failed: {e}")
             return {"status": "error", "message": str(e)}

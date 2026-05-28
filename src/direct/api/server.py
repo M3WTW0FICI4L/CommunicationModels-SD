@@ -57,7 +57,9 @@ def create_app() -> FastAPI:
         client_id: str = Query(..., description="Client identifier"),
         request_id: str = Query(..., description="Unique request ID (idempotency key)"),
         ticket_type: str = Query(..., description='"unnumbered" or "numbered"'),
-        seat_id: Optional[int] = Query(None, description="Seat number (numbered tickets only)"),
+        seat_id: Optional[int] = Query(
+            None, description="Seat number (numbered tickets only)"
+        ),
     ):
         """Purchase a ticket (unnumbered or numbered)."""
         # Validate ticket_type
@@ -66,7 +68,10 @@ def create_app() -> FastAPI:
         except ValueError:
             raise HTTPException(
                 status_code=400,
-                detail=f"Invalid ticket_type '{ticket_type}'. Use 'unnumbered' or 'numbered'.",
+                detail=(
+                    f"Invalid ticket_type '{ticket_type}'. "
+                    "Use 'unnumbered' or 'numbered'."
+                ),
             )
 
         if t_type == TicketType.NUMBERED and seat_id is None:
@@ -84,7 +89,11 @@ def create_app() -> FastAPI:
 
         response = ticket_manager.buy_ticket(request)
 
-        status_code = 200 if response.status in (RequestStatus.SUCCESS, RequestStatus.DUPLICATE) else 409
+        status_code = (
+            200
+            if response.status in (RequestStatus.SUCCESS, RequestStatus.DUPLICATE)
+            else 409
+        )
 
         return JSONResponse(
             status_code=status_code,
