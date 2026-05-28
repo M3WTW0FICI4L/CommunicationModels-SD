@@ -1,0 +1,69 @@
+name: Load Test (manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      ticket_type:
+        description: 'unnumbered or numbered'
+        required: true
+        default: 'unnumbered'
+      concurrent_clients:
+        description: 'Number of concurrent clients/workers'
+        required: false
+        default: '50'
+      workload:
+        description: 'Workload file path in repo'
+        required: false
+        default: 'benchmarks/benchmark_unnumbered_20000.txt'
+
+jobs:
+  run-benchmark:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install requirements
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Set up Docker Compose
+        uses: docker/compose-action@v2
+        with:
+          version: 'v2'
+
+      - name: Start Docker Compose stack
+        run: |
+          docker compose -f docker/docker-compose.stateless.yml up -d --build --scale worker=4
+
+      - name: Wait for RabbitMQ to be reachable
+        run: |
+          for i in $(seq 1 30); do
+            if timeout 1 bash -c "</dev/tcp/localhost/${RABBIT_PORT}" 2>/dev/null; then
+              echo "RabbitMQ reachable"
+              break
+            fi
+            echo "Waiting for RabbitMQ to start... (${i}/30)"
+            sleep 2
+          done
+
+      - name: Run stateless benchmark script
+        env:
+          RABBITMQ_HOST: ${{ secrets.RABBITMQ_HOST }}
+          RABBITMQ_PORT: ${{ secrets.RABBITMQ_PORT }}
+          RABBITMQ_USER: ${{ secrets.RABBITMQ_USER }}
+          RABBITMQ_PASS: ${{ secrets.RABBITMQ_PASS }}
+        run: |
+          chmod +x scripts/run_satateless_benchmark.sh || true
+          scripts/run_satateless_benchmark.sh ${{ github.event.inputs.ticket_type }} ${{ github.event.inputs.concurrent_clients }}
+
+      - name: Tear down Docker Compose stack
+        if: always()
+        run: |
+          docker compose -f docker/docker-compose.stateless.yml down --volumes --remove-orphans

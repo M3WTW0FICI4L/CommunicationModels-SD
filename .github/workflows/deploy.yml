@@ -1,0 +1,26 @@
+name: Deploy (skeleton)
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Target environment (staging|production)'
+        required: true
+        default: 'staging'
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate inputs
+        run: |
+          echo "Deploying to: ${{ github.event.inputs.environment }}"
+
+      - name: Placeholder - deployment steps
+        run: |
+          echo "This workflow is a skeleton. Add deployment steps here."
+          echo "If deploying to AWS/ECS or ECR, set secrets: AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_REGION"
+          echo "If deploying to Docker Hub set: DOCKERHUB_USERNAME, DOCKERHUB_TOKEN"
