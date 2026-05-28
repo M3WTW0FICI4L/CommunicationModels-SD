@@ -1,4 +1,16 @@
 # Git ignore file for SD Project
+
+## AWS
+*.pem
+p2-aws/cdk.out/
+p2-aws/infra/cdk.out/
+p2-aws/infra/cdk.context.json
+p2-aws/config/stack_outputs.json
+.aws/
+
+## Claude Code state
+.claude/
+
 ## Python
 .venv/
 .pytest_cache/

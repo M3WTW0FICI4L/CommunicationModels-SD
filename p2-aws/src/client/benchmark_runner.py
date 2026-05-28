@@ -9,6 +9,7 @@ Usage:
 import argparse
 import json
 import os
+import threading
 import time
 import pika
 import boto3
@@ -28,18 +29,22 @@ def _make_pika_channel():
         pika.ConnectionParameters(host=RABBITMQ_HOST, credentials=creds)
     )
     ch = conn.channel()
-    ch.queue_declare(queue=RABBITMQ_QUEUE, durable=True)
+    # Passive declare: the queue is owned by setup_rabbitmq.sh (with DLX args).
+    ch.queue_declare(queue=RABBITMQ_QUEUE, passive=True)
     return conn, ch
 
 
 def _rabbitmq_sender(ch):
+    # pika.BlockingConnection channels are NOT thread-safe; serialize publishes.
+    lock = threading.Lock()
     def send(msg: dict):
-        ch.basic_publish(
-            exchange="",
-            routing_key=RABBITMQ_QUEUE,
-            body=json.dumps(msg).encode(),
-            properties=pika.BasicProperties(delivery_mode=2, message_id=msg["request_id"]),
-        )
+        with lock:
+            ch.basic_publish(
+                exchange="",
+                routing_key=RABBITMQ_QUEUE,
+                body=json.dumps(msg).encode(),
+                properties=pika.BasicProperties(delivery_mode=2, message_id=msg["request_id"]),
+            )
     return send
 
 

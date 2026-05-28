@@ -1,75 +1,104 @@
 #!/usr/bin/env python3
 """
-Dynamic scaling controller.
-Polls SQS queue depth and adjusts Lambda reserved concurrency using:
-  N = (B + lambda_rate * Tr) / (C * Tr)
+Dynamic scaling controller (post-SQS-pivot).
 
-Run on any machine with AWS credentials. Typically started alongside the benchmark.
+Polls RabbitMQ queue depth, applies the elasticity formula
+    N = (B + lambda_rate * Tr) / (C * Tr)
+and converges the number of alive Lambda workers to N by either:
+  * invoking new Lambdas (boto3 invoke InvocationType=Event), or
+  * publishing QUIT control messages to the same queue (each Lambda exits
+    when it consumes one).
+
+Tracks alive workers locally — Lambdas also self-exit on idle timeout so
+the local count is a soft target rather than an exact contract.
+
+Run on any machine with AWS credentials + network access to RabbitMQ.
+Designed to be started alongside the benchmark.
 """
+import json
+import math
 import os
 import time
-import math
 import boto3
+import pika
+import uuid
 
 AWS_REGION = os.environ.get("AWS_REGION", "us-east-1")
-SQS_QUEUE_URL = os.environ["SQS_QUEUE_URL"]
 LAMBDA_FUNCTION_NAME = os.environ["LAMBDA_FUNCTION_NAME"]
+RABBITMQ_HOST = os.environ["RABBITMQ_HOST"]
+RABBITMQ_USER = os.environ.get("RABBITMQ_USER", "admin")
+RABBITMQ_PASS = os.environ.get("RABBITMQ_PASS", "admin123")
+RABBITMQ_QUEUE = os.environ.get("RABBITMQ_QUEUE", "ticket_requests")
 
-# Scaling parameters (calibrated experimentally)
-C = float(os.environ.get("WORKER_CAPACITY", "8"))    # processed msgs/s per Lambda concurrency unit
-Tr = float(os.environ.get("TARGET_RESPONSE_S", "1")) # target response time in seconds
-MIN_WORKERS = int(os.environ.get("MIN_WORKERS", "1"))
-MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "50"))
+C = float(os.environ.get("WORKER_CAPACITY", "8"))
+Tr = float(os.environ.get("TARGET_RESPONSE_S", "2"))
+MIN_WORKERS = int(os.environ.get("MIN_WORKERS", "0"))
+MAX_WORKERS = int(os.environ.get("MAX_WORKERS", "20"))
 POLL_INTERVAL_S = float(os.environ.get("POLL_INTERVAL_S", "5"))
 
-sqs = boto3.client("sqs", region_name=AWS_REGION)
 lam = boto3.client("lambda", region_name=AWS_REGION)
 cw = boto3.client("cloudwatch", region_name=AWS_REGION)
 
 _last_backlog = 0
 _last_time = time.time()
+_alive = 0  # local estimate of live workers
 
 
-def _get_queue_depth() -> int:
-    resp = sqs.get_queue_attributes(
-        QueueUrl=SQS_QUEUE_URL,
-        AttributeNames=["ApproximateNumberOfMessages", "ApproximateNumberOfMessagesNotVisible"],
+def _rabbit_channel():
+    creds = pika.PlainCredentials(RABBITMQ_USER, RABBITMQ_PASS)
+    params = pika.ConnectionParameters(
+        host=RABBITMQ_HOST, credentials=creds, heartbeat=60
     )
-    attrs = resp["Attributes"]
-    visible = int(attrs.get("ApproximateNumberOfMessages", 0))
-    in_flight = int(attrs.get("ApproximateNumberOfMessagesNotVisible", 0))
-    return visible + in_flight
+    conn = pika.BlockingConnection(params)
+    ch = conn.channel()
+    ch.queue_declare(queue=RABBITMQ_QUEUE, passive=True)
+    return conn, ch
 
 
-def _estimate_arrival_rate(backlog: int) -> float:
-    """Estimate λ from the change in backlog over the poll interval."""
+def _queue_depth(ch) -> int:
+    """Use queue_declare(passive=True) to get message count cheaply."""
+    res = ch.queue_declare(queue=RABBITMQ_QUEUE, passive=True)
+    return res.method.message_count
+
+
+def _estimate_rate(backlog: int) -> float:
     global _last_backlog, _last_time
     now = time.time()
     dt = now - _last_time
     if dt < 0.1:
         return 0.0
-    # Arrival rate ≈ (new_backlog - old_backlog) / dt  (rough estimate)
-    # In practice we'd use CloudWatch NumberOfMessagesSent metric for accuracy
     delta = backlog - _last_backlog
     _last_backlog = backlog
     _last_time = now
     return max(0.0, delta / dt)
 
 
-def _compute_n(backlog: int, arrival_rate: float) -> int:
-    """N = (B + λ * Tr) / (C * Tr)"""
-    n = (backlog + arrival_rate * Tr) / (C * Tr)
+def _compute_n(backlog: int, rate: float) -> int:
+    n = (backlog + rate * Tr) / (C * Tr)
     return max(MIN_WORKERS, min(MAX_WORKERS, math.ceil(n)))
 
 
-def _set_lambda_concurrency(n: int):
-    lam.put_function_concurrency(
-        FunctionName=LAMBDA_FUNCTION_NAME,
-        ReservedConcurrentExecutions=n,
-    )
+def _invoke_workers(k: int):
+    for _ in range(k):
+        lam.invoke(
+            FunctionName=LAMBDA_FUNCTION_NAME,
+            InvocationType="Event",
+            Payload=json.dumps({"worker_id": uuid.uuid4().hex[:8]}).encode(),
+        )
 
 
-def _put_scaling_metric(n: int, backlog: int, rate: float):
+def _send_quits(ch, k: int):
+    body = json.dumps({"action": "quit"}).encode()
+    for _ in range(k):
+        ch.basic_publish(
+            exchange="",
+            routing_key=RABBITMQ_QUEUE,
+            body=body,
+            properties=pika.BasicProperties(delivery_mode=2, priority=255),
+        )
+
+
+def _put_metric(n: int, backlog: int, rate: float):
     try:
         cw.put_metric_data(
             Namespace="TicketService",
@@ -84,26 +113,46 @@ def _put_scaling_metric(n: int, backlog: int, rate: float):
 
 
 def run():
+    global _alive
     print(f"Scaler started. C={C} msg/s, Tr={Tr}s, min={MIN_WORKERS}, max={MAX_WORKERS}")
-    current_n = MIN_WORKERS
-    _set_lambda_concurrency(current_n)
 
-    while True:
+    conn, ch = _rabbit_channel()
+    try:
+        while True:
+            try:
+                backlog = _queue_depth(ch)
+                rate = _estimate_rate(backlog)
+                target = _compute_n(backlog, rate)
+
+                if target > _alive:
+                    add = target - _alive
+                    print(f"Scale UP {_alive} -> {target} (B={backlog}, rate={rate:.1f}/s) invoking {add}")
+                    _invoke_workers(add)
+                    _alive = target
+                elif target < _alive:
+                    drop = _alive - target
+                    print(f"Scale DOWN {_alive} -> {target} (B={backlog}, rate={rate:.1f}/s) sending {drop} QUITs")
+                    _send_quits(ch, drop)
+                    _alive = target
+
+                _put_metric(_alive, backlog, rate)
+            except (pika.exceptions.AMQPError, pika.exceptions.ConnectionClosed) as e:
+                print(f"RabbitMQ error: {e} — reconnecting in 5s")
+                try:
+                    conn.close()
+                except Exception:
+                    pass
+                time.sleep(5)
+                conn, ch = _rabbit_channel()
+            except Exception as e:
+                print(f"Scaler error: {e}")
+
+            time.sleep(POLL_INTERVAL_S)
+    finally:
         try:
-            backlog = _get_queue_depth()
-            rate = _estimate_arrival_rate(backlog)
-            target_n = _compute_n(backlog, rate)
-
-            if target_n != current_n:
-                print(f"Scaling: {current_n} → {target_n}  (B={backlog}, λ={rate:.1f}/s)")
-                _set_lambda_concurrency(target_n)
-                current_n = target_n
-
-            _put_scaling_metric(current_n, backlog, rate)
-        except Exception as e:
-            print(f"Scaler error: {e}")
-
-        time.sleep(POLL_INTERVAL_S)
+            conn.close()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

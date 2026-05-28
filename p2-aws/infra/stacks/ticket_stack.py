@@ -1,11 +1,25 @@
-import os
+"""CDK stack — post-SQS-pivot version.
+
+Architecture:
+  Client -> RabbitMQ (EC2) -> Lambda workers (invoked on demand by the
+  scaler, which runs on the VM) -> PostgreSQL (EC2).
+
+There is no SQS or DLQ. The scaler converges the number of alive Lambda
+workers to N = (B + lambda*Tr) / (C*Tr) by either invoking new Lambdas
+or publishing QUIT control messages to the RabbitMQ queue.
+
+AWS Academy Learner Lab constraints (account 523786088090):
+  - Cannot create IAM roles -> reuse LabRole and LabInstanceProfile.
+  - cdk bootstrap cannot create its toolkit roles -> use
+    CliCredentialsStackSynthesizer with a pre-created assets bucket.
+  - Use ec2.CfnInstance so CDK does not try to create a default
+    instance role.
+"""
 import aws_cdk as cdk
 from aws_cdk import (
     Stack,
     aws_ec2 as ec2,
-    aws_sqs as sqs,
     aws_lambda as lambda_,
-    aws_lambda_event_sources as lambda_es,
     aws_iam as iam,
     aws_cloudwatch as cw,
     aws_s3 as s3,
@@ -20,134 +34,124 @@ class TicketServiceStack(Stack):
     def __init__(self, scope: Construct, construct_id: str, **kwargs):
         super().__init__(scope, construct_id, **kwargs)
 
+        lab_role_arn = f"arn:aws:iam::{self.account}:role/LabRole"
+        lab_role = iam.Role.from_role_arn(
+            self, "LabRole", lab_role_arn, mutable=False
+        )
+        lab_instance_profile_name = "LabInstanceProfile"
+
         # ── VPC ──────────────────────────────────────────────────────────────
-        vpc = ec2.Vpc(self, "TicketVpc",
+        vpc = ec2.Vpc(
+            self, "TicketVpc",
             max_azs=1,
-            nat_gateways=0,  # avoid NAT gateway cost
+            nat_gateways=0,
             subnet_configuration=[
-                ec2.SubnetConfiguration(name="Public", subnet_type=ec2.SubnetType.PUBLIC, cidr_mask=24),
+                ec2.SubnetConfiguration(
+                    name="Public",
+                    subnet_type=ec2.SubnetType.PUBLIC,
+                    cidr_mask=24,
+                ),
             ],
         )
+        public_subnet = vpc.public_subnets[0]
 
         # ── Security Groups ───────────────────────────────────────────────────
-        sg_rabbitmq = ec2.SecurityGroup(self, "SgRabbitMQ", vpc=vpc, description="RabbitMQ EC2")
+        sg_rabbitmq = ec2.SecurityGroup(
+            self, "SgRabbitMQ", vpc=vpc, description="RabbitMQ EC2"
+        )
         sg_rabbitmq.add_ingress_rule(ec2.Peer.any_ipv4(), ec2.Port.tcp(5672), "AMQP")
-        sg_rabbitmq.add_ingress_rule(ec2.Peer.any_ipv4(), ec2.Port.tcp(15672), "Management UI")
+        sg_rabbitmq.add_ingress_rule(ec2.Peer.any_ipv4(), ec2.Port.tcp(15672), "Mgmt UI")
         sg_rabbitmq.add_ingress_rule(ec2.Peer.any_ipv4(), ec2.Port.tcp(22), "SSH")
 
-        sg_postgres = ec2.SecurityGroup(self, "SgPostgres", vpc=vpc, description="PostgreSQL EC2")
+        sg_postgres = ec2.SecurityGroup(
+            self, "SgPostgres", vpc=vpc, description="PostgreSQL EC2"
+        )
         sg_postgres.add_ingress_rule(ec2.Peer.any_ipv4(), ec2.Port.tcp(5432), "PostgreSQL")
         sg_postgres.add_ingress_rule(ec2.Peer.any_ipv4(), ec2.Port.tcp(22), "SSH")
 
-        # ── Key pair (must be pre-created in AWS console) ─────────────────────
         key_name = self.node.try_get_context("key_name") or "ticket-key"
 
-        # ── User data: RabbitMQ EC2 ───────────────────────────────────────────
+        ami = ec2.MachineImage.latest_amazon_linux2(
+            edition=ec2.AmazonLinuxEdition.STANDARD,
+            virtualization=ec2.AmazonLinuxVirt.HVM,
+            storage=ec2.AmazonLinuxStorage.GENERAL_PURPOSE,
+        )
+        ami_id = ami.get_image(self).image_id
+
+        # ── RabbitMQ EC2 ──────────────────────────────────────────────────────
         rabbitmq_userdata = ec2.UserData.for_linux()
         rabbitmq_userdata.add_commands(
             "yum update -y",
-            "yum install -y python3-pip",
-            # Install RabbitMQ via Docker for simplicity
-            "yum install -y docker",
+            "yum install -y python3-pip docker",
             "systemctl enable docker && systemctl start docker",
             "docker run -d --name rabbitmq --restart always "
-            "  -p 5672:5672 -p 15672:15672 "
-            "  -e RABBITMQ_DEFAULT_USER=admin "
-            "  -e RABBITMQ_DEFAULT_PASS=admin123 "
-            "  rabbitmq:3.13-management-alpine",
-            # Install forwarder dependencies
+            "-p 5672:5672 -p 15672:15672 "
+            "-e RABBITMQ_DEFAULT_USER=admin "
+            "-e RABBITMQ_DEFAULT_PASS=admin123 "
+            "rabbitmq:3.13-management-alpine",
             "pip3 install pika boto3",
-            # The forwarder script is uploaded separately via SSM/SCP
         )
 
-        # ── EC2: RabbitMQ (t3.small for management UI overhead) ──────────────
-        self.rabbitmq_ec2 = ec2.Instance(self, "RabbitMQInstance",
-            instance_type=ec2.InstanceType("t3.small"),
-            machine_image=ec2.MachineImage.latest_amazon_linux2(),
-            vpc=vpc,
-            vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PUBLIC),
-            security_group=sg_rabbitmq,
+        self.rabbitmq_ec2 = ec2.CfnInstance(
+            self, "RabbitMQInstance",
+            instance_type="t3.small",
+            image_id=ami_id,
             key_name=key_name,
-            user_data=rabbitmq_userdata,
+            subnet_id=public_subnet.subnet_id,
+            security_group_ids=[sg_rabbitmq.security_group_id],
+            iam_instance_profile=lab_instance_profile_name,
+            user_data=cdk.Fn.base64(rabbitmq_userdata.render()),
+            tags=[cdk.CfnTag(key="Name", value="TicketRabbitMQ")],
         )
-        # Allow RabbitMQ EC2 to publish to SQS
-        self.rabbitmq_ec2.add_to_role_policy(iam.PolicyStatement(
-            actions=["sqs:SendMessage", "sqs:GetQueueAttributes", "cloudwatch:PutMetricData"],
-            resources=["*"],
-        ))
 
-        # ── User data: PostgreSQL EC2 ─────────────────────────────────────────
-        # Only installs PostgreSQL; schema setup done via scripts/setup_postgres.sh
+        # ── PostgreSQL EC2 ────────────────────────────────────────────────────
         postgres_userdata = ec2.UserData.for_linux()
         postgres_userdata.add_commands(
             "yum update -y",
             "amazon-linux-extras enable postgresql14",
-            "yum install -y postgresql14-server postgresql14",
+            "yum clean metadata",
+            "yum install -y postgresql postgresql-server",
             "postgresql-setup --initdb",
             "systemctl enable postgresql",
             "systemctl start postgresql",
         )
 
-        self.postgres_ec2 = ec2.Instance(self, "PostgresInstance",
-            instance_type=ec2.InstanceType("t3.micro"),
-            machine_image=ec2.MachineImage.latest_amazon_linux2(),
-            vpc=vpc,
-            vpc_subnets=ec2.SubnetSelection(subnet_type=ec2.SubnetType.PUBLIC),
-            security_group=sg_postgres,
+        self.postgres_ec2 = ec2.CfnInstance(
+            self, "PostgresInstance",
+            instance_type="t3.micro",
+            image_id=ami_id,
             key_name=key_name,
-            user_data=postgres_userdata,
+            subnet_id=public_subnet.subnet_id,
+            security_group_ids=[sg_postgres.security_group_id],
+            iam_instance_profile=lab_instance_profile_name,
+            user_data=cdk.Fn.base64(postgres_userdata.render()),
+            tags=[cdk.CfnTag(key="Name", value="TicketPostgres")],
         )
 
-        # ── SQS: Dead Letter Queue ────────────────────────────────────────────
-        dlq = sqs.Queue(self, "TicketDLQ",
-            queue_name="ticket-dlq",
-            retention_period=Duration.days(14),
+        # ── S3 results bucket ────────────────────────────────────────────────
+        results_bucket = s3.Bucket(
+            self, "ResultsBucket",
             removal_policy=RemovalPolicy.DESTROY,
         )
 
-        # ── SQS: Main Queue ───────────────────────────────────────────────────
-        self.main_queue = sqs.Queue(self, "TicketQueue",
-            queue_name="ticket-requests",
-            visibility_timeout=Duration.seconds(30),  # > lambda timeout
-            dead_letter_queue=sqs.DeadLetterQueue(
-                max_receive_count=3,
-                queue=dlq,
-            ),
-            removal_policy=RemovalPolicy.DESTROY,
-        )
-
-        # ── S3: Results/logs bucket ───────────────────────────────────────────
-        results_bucket = s3.Bucket(self, "ResultsBucket",
-            removal_policy=RemovalPolicy.DESTROY,
-            auto_delete_objects=True,
-        )
-
-        # ── Lambda: worker ────────────────────────────────────────────────────
-        worker_role = iam.Role(self, "LambdaWorkerRole",
-            assumed_by=iam.ServicePrincipal("lambda.amazonaws.com"),
-            managed_policies=[
-                iam.ManagedPolicy.from_aws_managed_policy_name("service-role/AWSLambdaBasicExecutionRole"),
-            ],
-        )
-        worker_role.add_to_policy(iam.PolicyStatement(
-            actions=[
-                "sqs:ReceiveMessage", "sqs:DeleteMessage", "sqs:GetQueueAttributes",
-                "cloudwatch:PutMetricData",
-                "s3:PutObject",
-            ],
-            resources=["*"],
-        ))
-
-        self.worker_lambda = lambda_.Function(self, "TicketWorker",
+        # ── Lambda worker ────────────────────────────────────────────────────
+        # Reads from RabbitMQ directly. Invoked on demand by the scaler.
+        # Long-running (up to ~14 min) until QUIT, idle timeout, or safety
+        # margin before Lambda hard-timeout.
+        self.worker_lambda = lambda_.Function(
+            self, "TicketWorker",
             runtime=lambda_.Runtime.PYTHON_3_12,
             handler="handler.lambda_handler",
             code=lambda_.Code.from_asset("../src/lambda_worker"),
-            timeout=Duration.seconds(20),
+            timeout=Duration.seconds(870),  # max 15 min; leave headroom
             memory_size=256,
-            role=worker_role,
-            reserved_concurrent_executions=1,  # start with 1, scaler adjusts
+            role=lab_role,
             environment={
-                "PG_HOST": self.postgres_ec2.instance_public_ip,
+                "RABBITMQ_HOST": self.rabbitmq_ec2.attr_public_ip,
+                "RABBITMQ_USER": "admin",
+                "RABBITMQ_PASS": "admin123",
+                "RABBITMQ_QUEUE": "ticket_requests",
+                "PG_HOST": self.postgres_ec2.attr_public_ip,
                 "PG_PORT": "5432",
                 "PG_DB": "tickets",
                 "PG_USER": "ticket_user",
@@ -155,48 +159,64 @@ class TicketServiceStack(Stack):
                 "RESULTS_BUCKET": results_bucket.bucket_name,
                 "MAX_UNNUMBERED": "100000",
                 "MAX_SEATS": "100000",
+                "IDLE_TIMEOUT_S": "20",
+                "SAFETY_MARGIN_S": "30",
             },
         )
 
-        # SQS triggers Lambda (batch size 10, auto-scales concurrency)
-        self.worker_lambda.add_event_source(
-            lambda_es.SqsEventSource(self.main_queue, batch_size=10)
+        # ── CloudWatch dashboard ─────────────────────────────────────────────
+        dashboard = cw.Dashboard(
+            self, "TicketDashboard", dashboard_name="TicketService"
         )
-
-        # ── CloudWatch Dashboard ──────────────────────────────────────────────
-        dashboard = cw.Dashboard(self, "TicketDashboard", dashboard_name="TicketService")
         dashboard.add_widgets(
             cw.GraphWidget(
-                title="SQS Queue Depth",
-                left=[self.main_queue.metric_approximate_number_of_messages_visible(
-                    period=Duration.seconds(10),
-                    statistic="Maximum",
-                )],
+                title="Queue Backlog (RabbitMQ)",
+                left=[
+                    cw.Metric(
+                        namespace="TicketService",
+                        metric_name="QueueBacklog",
+                        period=Duration.seconds(10),
+                        statistic="Maximum",
+                    )
+                ],
             ),
             cw.GraphWidget(
-                title="Lambda Concurrency",
-                left=[self.worker_lambda.metric_concurrent_executions(
-                    period=Duration.seconds(10),
-                )],
+                title="Target / Alive Workers",
+                left=[
+                    cw.Metric(
+                        namespace="TicketService",
+                        metric_name="TargetWorkers",
+                        period=Duration.seconds(10),
+                        statistic="Maximum",
+                    )
+                ],
             ),
             cw.GraphWidget(
-                title="Lambda Duration (ms)",
-                left=[self.worker_lambda.metric_duration(
-                    period=Duration.seconds(10),
-                    statistic="p99",
-                )],
+                title="Arrival Rate (msgs/s)",
+                left=[
+                    cw.Metric(
+                        namespace="TicketService",
+                        metric_name="ArrivalRate",
+                        period=Duration.seconds(10),
+                        statistic="Average",
+                    )
+                ],
             ),
             cw.GraphWidget(
-                title="DLQ Messages",
-                left=[dlq.metric_approximate_number_of_messages_visible(
-                    period=Duration.seconds(30),
-                )],
+                title="Processing Latency p99 (ms)",
+                left=[
+                    cw.Metric(
+                        namespace="TicketService",
+                        metric_name="ProcessingLatencyMs",
+                        period=Duration.seconds(10),
+                        statistic="p99",
+                    )
+                ],
             ),
         )
 
-        # ── Outputs ───────────────────────────────────────────────────────────
-        CfnOutput(self, "RabbitMQHost", value=self.rabbitmq_ec2.instance_public_ip)
-        CfnOutput(self, "PostgresHost", value=self.postgres_ec2.instance_public_ip)
-        CfnOutput(self, "SQSQueueUrl", value=self.main_queue.queue_url)
+        # ── Outputs ──────────────────────────────────────────────────────────
+        CfnOutput(self, "RabbitMQHost", value=self.rabbitmq_ec2.attr_public_ip)
+        CfnOutput(self, "PostgresHost", value=self.postgres_ec2.attr_public_ip)
         CfnOutput(self, "LambdaFunctionName", value=self.worker_lambda.function_name)
         CfnOutput(self, "ResultsBucketName", value=results_bucket.bucket_name)
