@@ -9,7 +9,10 @@
 #
 # Idempotent: re-running is safe. Each step checks for existing state.
 
-$ErrorActionPreference = "Stop"
+# Native commands (aws, ssh, scp, cdk) write to stderr in many normal
+# situations; "Stop" would abort the script. Stay on "Continue" and check
+# $LASTEXITCODE explicitly after critical steps.
+$ErrorActionPreference = "Continue"
 $BaseDir = Split-Path -Parent $PSScriptRoot
 $KeyPath = Join-Path $BaseDir "ticket-key.pem"
 $OutputsPath = Join-Path $BaseDir "config\stack_outputs.json"
@@ -38,28 +41,29 @@ Write-Host "Bucket: $Bucket"
 
 # ─── 3. EC2 key pair ──────────────────────────────────────────────────────────
 Step "Step 3/8: ensure EC2 key pair"
-$exists = aws ec2 describe-key-pairs --key-names ticket-key --query "KeyPairs[0].KeyName" --output text 2>$null
-if ($exists -eq "ticket-key") {
+# List all keys and check (avoids non-zero exit when key is absent).
+$allKeysJson = aws ec2 describe-key-pairs --query "KeyPairs[].KeyName" --output json
+$allKeys = $allKeysJson | ConvertFrom-Json
+$keyExistsInAws = $allKeys -contains "ticket-key"
+if ($keyExistsInAws) {
     Write-Host "Key pair 'ticket-key' already exists in AWS."
     if (-not (Test-Path $KeyPath)) {
         Write-Host "WARNING: no local ticket-key.pem found. Deleting AWS key and recreating..."
         aws ec2 delete-key-pair --key-name ticket-key | Out-Null
-        $exists = ""
+        $keyExistsInAws = $false
     }
 }
-if ($exists -ne "ticket-key") {
-    $raw = aws ec2 create-key-pair --key-name ticket-key --query KeyMaterial --output text
-    # PowerShell collapses PEM newlines — reformat to PEM with 64-char lines.
-    $begin = "-----BEGIN RSA PRIVATE KEY-----"
-    $end = "-----END RSA PRIVATE KEY-----"
-    $b64 = ($raw -replace [regex]::Escape($begin), "" -replace [regex]::Escape($end), "") -replace "\s", ""
-    $lines = @()
-    for ($i = 0; $i -lt $b64.Length; $i += 64) {
-        $len = [Math]::Min(64, $b64.Length - $i)
-        $lines += $b64.Substring($i, $len)
+if (-not $keyExistsInAws) {
+    # Restore write permission on any stale file from previous session,
+    # otherwise WriteAllText fails silently and SSH later breaks.
+    if (Test-Path $KeyPath) {
+        icacls $KeyPath /grant "${env:USERNAME}:F" 2>&1 | Out-Null
+        Remove-Item $KeyPath -Force
     }
-    $pem = "$begin`n" + ($lines -join "`n") + "`n$end`n"
-    [System.IO.File]::WriteAllText($KeyPath, $pem, [System.Text.UTF8Encoding]::new($false))
+    # --output json preserves newlines inside KeyMaterial reliably;
+    # --output text gets mangled by PowerShell's argument parser.
+    $resp = aws ec2 create-key-pair --key-name ticket-key --output json | ConvertFrom-Json
+    [System.IO.File]::WriteAllText($KeyPath, $resp.KeyMaterial, [System.Text.UTF8Encoding]::new($false))
     icacls $KeyPath /inheritance:r /grant:r "${env:USERNAME}:R" | Out-Null
     Write-Host "Key pair created and saved to $KeyPath"
 }

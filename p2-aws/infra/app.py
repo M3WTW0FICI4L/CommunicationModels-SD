@@ -15,8 +15,9 @@ app = cdk.App()
 account = (
     app.node.try_get_context("account")
     or os.environ.get("CDK_DEFAULT_ACCOUNT")
-    or "523786088090"
 )
+if not account:
+    raise SystemExit("No AWS account ID. Set CDK_DEFAULT_ACCOUNT or pass -c account=...")
 region = (
     app.node.try_get_context("region")
     or os.environ.get("CDK_DEFAULT_REGION")
