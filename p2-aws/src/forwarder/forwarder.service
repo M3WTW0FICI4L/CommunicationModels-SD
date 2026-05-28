@@ -1,0 +1,17 @@
+[Unit]
+Description=RabbitMQ to SQS Forwarder
+After=network.target docker.service
+Requires=docker.service
+
+[Service]
+Type=simple
+User=ec2-user
+EnvironmentFile=/etc/forwarder.env
+ExecStart=/usr/bin/python3 /home/ec2-user/forwarder/forwarder.py
+Restart=always
+RestartSec=5
+StandardOutput=journal
+StandardError=journal
+
+[Install]
+WantedBy=multi-user.target
